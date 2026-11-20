@@ -238,6 +238,15 @@ conservative fallthrough during discovery, then are redecoded as terminal branch
 returns before Decompiler Switch Analysis. A late pass revisits code discovered while
 switches are being recovered.
 
+`C6000 Tail Starts` starts a function at the packet right after an unpredicated return,
+jump or tail call and its delay slots (fetch-packet headers aside) when that code is
+already decoded, decodes up to an unpredicated branch of its own before it runs into
+another function or the end of memory, and nothing jumps or falls into it. Code reached
+only through a pointer (a hook table entry, a row of MVK/MVKH/B trampolines) has no call
+reference, so without it only the first of a row gets a function. Code after padding,
+undecoded bytes and anything a jump reaches start nothing: they are data, a block of the
+function before, or code nothing reaches.
+
 ### Switch dispatch
 
 `C6000JumpTableAnalyzer` recognizes a guarded table lookup: a CMPLTU/CMPGTU bound, an

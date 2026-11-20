@@ -13,6 +13,12 @@
 
 ### Added
 
+* `C6000 Tail Starts` analyzer: starts a function at the packet right after an
+  unpredicated return, jump or tail call when that code is already decoded, reaches an
+  unpredicated branch of its own, and nothing jumps or falls into it. Code reached only
+  through pointers, such as a row of MVK/MVKH/B trampolines, got a function only for its
+  first entry. Code after padding and undecoded bytes start nothing.
+
 * Latched branches (issue #73). A branch issued in another branch's delay window lands
   after it, and native lifting gives each branch one window that holds no other branch.
   Where the hardware and the listing then run different instructions, the new `C6000
