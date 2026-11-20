@@ -5,8 +5,9 @@ Independent synthetic fields: SPRUFE8B 3.5, 3.7, 3.8.10, 4.2.6, CALLP p.172,
 B/register and BNOP/register, compact Scs10 Figure F-19, predicate facts from
 predicated writes and across a backward jump, and a load disabled at issue still
 in flight when the return lands; calls to separate functions, tail calls and
-jumps onto another function's entry in ordinary schedules, and switches through a
-guarded jump table. No firmware bytes.
+jumps onto another function's entry in ordinary schedules, switches through a
+guarded jump table, long-branch veneers and return addresses built with MVK/MVKH.
+No firmware bytes.
 """
 from pathlib import Path
 import json,struct,sys
@@ -227,6 +228,25 @@ def main():
   for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
  rows.append(dict(name='tail_call_link_at_branch',mode='separate',caller=c,caller_end=c+8,sites=[dict(callee=f,callee_end=f+8)],
                   expected={'PC':0x9000},callee_b3=0x1234,calls=[f]))
+ def veneer(name,kill=None):
+  # MVK lo,B31; MVKH hi,B31; B B31 with B3 still the entry link: a tail call to the constant,
+  # kept as a direct CALL. A predicated MVKH, or another write to B31 before the branch, leaves
+  # the target unknown.
+  c=0x1000+len(rows)*0x800;f=c+0x200;high=mvk(f>>16,31,2,True)
+  words=[mvk(f,31,2),high|1<<29 if kill=='predicated' else high]+([mv(5,31,2)] if kill=='overwritten' else [])+[31<<18|0x362,4<<13]
+  for at,block in [(c,words),(f,[mvk(0x77,4),bnop(3)])]:
+   for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
+  row=dict(name=name,mode='separate',caller=c,caller_end=c+len(words)*4,sites=[dict(callee=f,callee_end=f+8)],expected={},compile_only=True)
+  if kill:row['refused']='unresolved register branch'
+  else:row['calls']=[f]
+  rows.append(row)
+ veneer('veneer_tail_call');veneer('veneer_predicated_high','predicated');veneer('veneer_overwritten','overwritten')
+ # B f; MVKL ret,B3; MVKH ret,B3; NOP 3: the TI call sequence with the return address built
+ # in the delay slots. A call to f, returning to ret.
+ c=0x1000+len(rows)*0x800;f=c+0x200;ret_at=c+16
+ for at,block in [(c,[branch(c,f),mvk(ret_at,3,2),mvk(ret_at>>16,3,2,True),2<<13,mvk(5,9),bnop(3)]),(f,[mvk(0x77,4),bnop(3)])]:
+  for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
+ rows.append(dict(name='call_link_built_in_slots',mode='separate',caller=c,caller_end=c+24,sites=[dict(callee=f,callee_end=f+8)],expected={},compile_only=True,calls=[f]))
  assert len(rows)*0x800<=len(image)
  Path(sys.argv[1]).write_bytes(image);Path(sys.argv[2]).write_text(json.dumps(rows,indent=2)+'\n')
 if __name__=='__main__':main()

@@ -25,6 +25,11 @@
   register with each entry in turn (the guard makes that exhaustive). A `COMPUTED_JUMP`
   reference alone doesn't make a switch. A target outside any function refuses the
   schedule.
+* Return addresses built with `MVK`/`MVKL` + `MVKH` into B3 (the TI sequence
+  `B f; MVKL ret,B3; MVKH ret,B3`) prove a call like an `ADDKPC` constant, and a long-branch
+  veneer (`MVK lo,B31; MVKH hi,B31; B B31`) is a direct branch to its constant. A branch
+  register is tracked only after a compile was refused on an unresolved branch through
+  it; the compile is then tried again.
 * `C6000PipelineCompiler.callLandings()` reports what each call or jump onto another
   entry leaves in flight, as evidence for the callee's own entry.
 

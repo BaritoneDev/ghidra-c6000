@@ -529,7 +529,7 @@ public final class C6000PipelineCompiler {
     private static boolean oversize(IllegalArgumentException e){
         var m=e.getMessage();return m!=null&&(m.contains("too large for the decompiler")||m.contains("distinct pipeline states"));
     }
-    private C6000PipelineCompiler merged(int level){var retry=new C6000PipelineCompiler(program,function,entryNames);retry.widenDrained=level;retry.refine=false;retry.monitor=monitor;return retry;}
+    private C6000PipelineCompiler merged(int level){var retry=new C6000PipelineCompiler(program,function,entryNames);retry.widenDrained=level;retry.refine=false;retry.monitor=monitor;retry.constantRegisters=constantRegisters;return retry;}
     /** By default the builder's limit. Decompile time grows fast with schedule size (69k ops
      * 17 s, 79k 53 s, 99k 160 s, 138k 182 s; a typical large DSP routine is about 19k), so a
      * caller with a decompile timeout may lower it. */
@@ -544,7 +544,7 @@ public final class C6000PipelineCompiler {
     private boolean lastTry;
     private C6000PipelineCompiler relaxed(int level){
         C6000PipelineCompiler retry;
-        if(level==3){retry=new C6000PipelineCompiler(program,function,entryNames);retry.monitor=monitor;retry.lastTry=true;}
+        if(level==3){retry=new C6000PipelineCompiler(program,function,entryNames);retry.monitor=monitor;retry.constantRegisters=constantRegisters;retry.lastTry=true;}
         else retry=merged(Math.min(level,2));
         if(level>2){retry.stateCap=2*maxStates;retry.opCap=maxPcodeOps*4/3;}
         return retry;
@@ -1030,6 +1030,14 @@ public final class C6000PipelineCompiler {
         if(traceContract!=null||closedCall!=null||callerTail!=null||storeTailContract!=null)throw fail("trace compiler is not an ordinary function schedule");
         try{return compileInternal();}
         catch(IllegalArgumentException e){
+            if(widenDrained==0&&refine&&!lastTry&&unresolvedRegister!=null&&!constantRegisters.contains(unresolvedRegister)){
+                var retry=new C6000PipelineCompiler(program,function,entryNames);retry.monitor=monitor;
+                var tracked=new HashSet<>(constantRegisters);tracked.add(unresolvedRegister);retry.constantRegisters=Set.copyOf(tracked);
+                Result result;
+                try{result=retry.compile();}catch(IllegalArgumentException again){throw e;}
+                callLandings.clear();callLandings.addAll(retry.callLandings);
+                return result;
+            }
             // without the refinements, merged at drained points, merged wherever no branch is
             // pending, then with the caps raised, refined and merged
             if(widenDrained>0||!refine||lastTry||!oversize(e))throw e;
@@ -1481,11 +1489,20 @@ public final class C6000PipelineCompiler {
         return f!=null&&!f.equals(function);
     }
     // B3 origins beyond NO_CALL/ENTRY_LINK/call sites: a reload from memory, "not written since the
-    // last call returned", and code addresses built by ADDKPC (LINK_CONST - value). A branch
+    // last call returned", and code addresses built by ADDKPC or MVK/MVKL + MVKH (LINK_CONST -
+    // value). LOW_CONST - low16 marks a register holding only the low half from MVK/MVKL. A branch
     // target SWITCH_JUMP marks a register branch through a bounded jump table.
-    private static final long RESTORED_LINK=-3,STALE_LINK=-5,LINK_CONST=-(1L<<33),INDIRECT_CALL=-0x8000L,SWITCH_JUMP=-0x9000L;
+    private static final long RESTORED_LINK=-3,STALE_LINK=-5,LINK_CONST=-(1L<<33),LOW_CONST=-(1L<<40),INDIRECT_CALL=-0x8000L,SWITCH_JUMP=-0x9000L;
     private static boolean linkConstant(Long origin){return origin!=null&&origin<=LINK_CONST&&origin>LINK_CONST-(1L<<32);}
+    // A register branch other than B3's whose register holds an MVK/MVKL + MVKH constant on this
+    // path (a long-branch veneer: MVK lo,B31; MVKH hi,B31; B B31) is a direct branch to that
+    // constant. Tags cost states, so a register is tracked only after a compile was refused on an
+    // unresolved branch through it; compile() then tries again. Any other write clears the tag,
+    // as for B3.
+    private Set<Long> constantRegisters=Set.of();
+    private Long unresolvedRegister;
     private IllegalArgumentException unresolved(Instruction branch){
+        var register=branch.getRegister(0);if(register!=null)unresolvedRegister=register.getAddress().getOffset();
         return fail("unresolved register branch "+branch);
     }
     // A register branch is a switch when C6000JumpTableAnalyzer reads its table from the code: a
@@ -1669,7 +1686,18 @@ public final class C6000PipelineCompiler {
             forgetReturnOutput(after,written,d,reload?Long.valueOf(RESTORED_LINK):null,reload);}}
         for(var instruction:pack){int truth=predicateTruth(instruction,source.facts());if(truth==0)continue;var copied=copiedSource(instruction);Long origin=copied==null?null:before.get(copied.getAddress().getOffset());if(instruction.name().equals("CALLP"))origin=instruction.instruction().getAddress().getOffset();
             if(instruction.name().equals("ADDKPC")&&!instruction.outputs().isEmpty()){Long k=C6000LoopCounterProof.constantOutput(program.getLanguage(),instruction.raw(),instruction.outputs().get(0).offset(),4);origin=k==null?null:LINK_CONST-(k&0xffffffffL);}
-            for(var d:instruction.outputs())if(d.phase()==1){Long value=d.size()==4&&d.mask()==-1&&d.sourceWrite()<0?origin:null;if(truth<0&&!Objects.equals(before.get(d.offset()),value))value=null;forgetReturnOutput(after,written,d,value,true);}
+            // MVK/MVKL sets the low half of a return address, MVKH completes it (the TI call
+            // sequence B target; MVKL ret,B3; MVKH ret,B3 in the delay slots)
+            Long high=null;
+            // only into B3 and the tracked branch registers: tags in other registers would split
+            // states that differ in nothing else
+            boolean intoB3=!instruction.outputs().isEmpty()&&(instruction.outputs().get(0).offset()==b3||constantRegisters.contains(instruction.outputs().get(0).offset()));
+            if(intoB3&&Set.of("MVK","MVKL").contains(instruction.name())&&instruction.instruction().getLength()==4&&instruction.instruction().getScalar(0)!=null)origin=LOW_CONST-(instruction.instruction().getScalar(0).getUnsignedValue()&0xffff);
+            if(intoB3&&instruction.name().equals("MVKH")&&instruction.instruction().getScalar(0)!=null){
+                Long low=before.get(instruction.outputs().get(0).offset());long h=instruction.instruction().getScalar(0).getUnsignedValue();if((h&0xffff0000L)==0)h<<=16;
+                if(low!=null&&low<=LOW_CONST&&low>LOW_CONST-0x10000)high=LINK_CONST-((h&0xffff0000L)|(LOW_CONST-low));
+            }
+            for(var d:instruction.outputs())if(d.phase()==1){Long value=high!=null&&d.size()==4?high:d.size()==4&&d.mask()==-1&&d.sourceWrite()<0?origin:null;if(truth<0&&!Objects.equals(before.get(d.offset()),value))value=null;forgetReturnOutput(after,written,d,value,true);}
         }
         return new ReturnFlow(source.returns().activeCall(),Map.copyOf(after));
     }

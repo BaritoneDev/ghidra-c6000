@@ -45,10 +45,11 @@ public class C6000B3CallTest extends GhidraScript {
 		}
 		expect(0x1000L, "+ 1");
 		expect(0x102cL, "callee()");
-		// An exact schedule cannot return through a B3 that holds a new link: it refuses the
-		// call unless a closed-call contract describes it, and still schedules a plain return.
-		refuses(0x1000L);
-		refuses(0x102cL);
+		// An exact schedule never returns through a B3 that holds a new link: the link built
+		// with MVK/MVKH in the delay slots proves the call, which it keeps as a call through
+		// the register (viaptr) or to the constant B3 held at the branch (direct).
+		keepsCall(0x1000L, null);
+		keepsCall(0x102cL, 0x105cL);
 		new C6000PipelineCompiler(currentProgram, getFunctionAt(toAddr(0x105cL))).compile();
 		println("C6000_B3_CALL_OK checks=9");
 	}
@@ -85,14 +86,15 @@ public class C6000B3CallTest extends GhidraScript {
 		}
 	}
 
-	private void refuses(long entry) {
-		try {
-			new C6000PipelineCompiler(currentProgram, getFunctionAt(toAddr(entry))).compile();
+	/** The ordinary schedule keeps the call: CALL to target, or CALLIND when target is null. */
+	private void keepsCall(long entry, Long target) throws Exception {
+		var schedule = new C6000PipelineCompiler(currentProgram, getFunctionAt(toAddr(entry))).compile();
+		boolean found = false;
+		for (PcodeOp op : schedule.code()) {
+			if (target == null && op.getOpcode() == PcodeOp.CALLIND) found = true;
+			if (target != null && op.getOpcode() == PcodeOp.CALL && op.getInput(0).getOffset() == target) found = true;
 		}
-		catch (Exception expected) {
-			return;
-		}
-		throw new AssertionError("exact schedule of " + toAddr(entry) + " returned through a call's B3");
+		if (!found) throw new AssertionError("exact schedule of " + toAddr(entry) + " lost its call");
 	}
 
 	private void expect(long entry, String text) throws Exception {
