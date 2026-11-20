@@ -992,16 +992,25 @@ public class C6000CallAnalyzer extends AbstractAnalyzer {
 
 	/**
 	 * In an if/else pair sharing one B3 ("call Y if p, else jump to X") only
-	 * one arm is a call. A register arm is the call; between two immediate
-	 * arms the nearer target is the local else-block, so that arm is the
-	 * jump. Both arms to one target (one callee either way) stay calls.
+	 * one arm is a call. An arm that branches through B3 itself is the return
+	 * ("if p return, else call Y"): the link the window sets is the other arm's
+	 * (SPRUFE8B ADDKPC p.128, 4.2.6).
+	 * Another register arm is the call; between two immediate arms the nearer
+	 * target is the local else-block, so that arm is the jump. Both arms to one
+	 * target (one callee either way) stay calls.
 	 */
 	static boolean jumpArm(Instruction branch, Instruction partner) {
+		if (throughB3(partner)) return false;
+		if (throughB3(branch)) return true;
 		Long mine = targetDistance(branch), theirs = targetDistance(partner);
 		if (mine == null) return false;
 		if (theirs == null) return true;
 		if (java.util.Arrays.equals(branch.getFlows(), partner.getFlows())) return false;
 		return mine < theirs;
+	}
+
+	private static boolean throughB3(Instruction insn) {
+		return insn.getRegister(0) != null && insn.getRegister(0).getName().equals("B3");
 	}
 
 	/** Distance to an immediate branch target, or null for a register branch. */

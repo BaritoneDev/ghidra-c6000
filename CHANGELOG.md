@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* In an if/else whose arms are a call and a return through B3 (`[!A0] B f` with
+  `[A0] B B3` in its window and one `ADDKPC` setting the call's link), the return arm
+  stays a return and the other arm is the call. The register arm was always taken for the
+  call, so the return became a conditional call and the call a jump, and exact schedules
+  refused the function at the return.
+
 ## 1.3.0 - 2026-11-18
 
 ### Changed
