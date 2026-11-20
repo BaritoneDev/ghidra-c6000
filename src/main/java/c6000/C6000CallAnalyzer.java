@@ -877,7 +877,7 @@ public class C6000CallAnalyzer extends AbstractAnalyzer {
 		}
 
 		/** The rest of {@code jump}'s execute packet and its five delay cycles; null on an incomplete window. */
-		private List<Instruction> window(Instruction jump) {
+		List<Instruction> window(Instruction jump) {
 			return window(jump, DELAY_CYCLES);
 		}
 

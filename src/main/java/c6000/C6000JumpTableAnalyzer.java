@@ -65,6 +65,8 @@ import ghidra.util.task.TaskMonitor;
  *   B/BNOP  r                   ; dispatch; [p] B default is in the delay slots
  * </pre>
  *
+ * The load may also index the base directly: {@code LDW *t[idx], r}.
+ *
  * Ghidra's decompiler finds the table but, with the guard and the predicated
  * loads spread over the delay slots, cannot bound it ("Too many branches").
  * This reads the N+1 entries the guard allows, stopping at the first that
@@ -267,14 +269,51 @@ public class C6000JumpTableAnalyzer extends AbstractAnalyzer {
 		return owner instanceof Function ? (Function) owner : null;
 	}
 
-	/** The table entries a register branch dispatches to, or an empty list. */
+	/** The table entries a register branch dispatches to, as bounded by its guard; empty when
+	 * there is no guarded table. */
+	public static List<Address> switchTargets(Program program, Instruction branch) {
+		return targets(program, new C6000CallAnalyzer.Walker(program), branch);
+	}
+
+	/** The table entries a register branch dispatches to, or an empty list. The straight-line
+	 * code before the branch is read first; when that finds no table, each jump into that code
+	 * gives another path: what precedes the jump, its delay slots, then the code from its target. */
 	static List<Address> targets(Program program, C6000CallAnalyzer.Walker walker,
 			Instruction branch) {
+		List<Instruction> linear = walker.lookBack(branch);
+		List<Address> found = targets(program, walker, branch, linear);
+		if (!found.isEmpty()) return found;
+		Listing listing = program.getListing();
+		for (int k = linear.size() - 1; k >= 0; k--) {
+			Instruction landing = linear.get(k);
+			if (landing.getFlowType().isJump() || landing.getFlowType().isTerminal()) break;
+			for (Reference ref : program.getReferenceManager().getReferencesTo(landing.getMinAddress())) {
+				if (!ref.getReferenceType().isJump()) continue;
+				Instruction jump = listing.getInstructionAt(ref.getFromAddress());
+				List<Instruction> slots = jump == null ? null : walker.window(jump);
+				if (slots == null) continue;
+				List<Instruction> path = new ArrayList<>(walker.lookBack(jump));
+				path.add(jump);
+				path.addAll(slots);
+				path.addAll(linear.subList(k, linear.size()));
+				found = targets(program, walker, branch, path);
+				if (!found.isEmpty()) return found;
+			}
+		}
+		return found;
+	}
+
+	private static List<Address> targets(Program program, C6000CallAnalyzer.Walker walker,
+			Instruction branch, List<Instruction> path) {
 		Map<Register, long[]> regs = new HashMap<>();
 		Map<Register, Long> tableBase = new HashMap<>();	// holds table (+ index)
 		Map<Register, Long> loaded = new HashMap<>();		// holds an entry of table
 		Long bound = null;
-		for (Instruction insn : walker.lookBack(branch)) {
+		String guard = null;
+		for (Instruction insn : path) {
+			// the dispatch runs with the guard false: what it predicates true is the default path
+			// (SPRUFE8B 3.6)
+			if (guard != null && guard.equals(predicate(insn))) continue;
 			String op = C6000CallAnalyzer.baseName(insn);
 			String name = op.contains(".") ? op.substring(0, op.indexOf('.')) : op;
 			int n = insn.getNumOperands();
@@ -284,7 +323,8 @@ public class C6000JumpTableAnalyzer extends AbstractAnalyzer {
 				base = table(program, regs, tableBase, insn.getRegister(0));
 				if (base == null) base = table(program, regs, tableBase, insn.getRegister(1));
 			}
-			else if (name.equals("LDW") && n == 2) {
+			// LDW *+t[0],r (address precomputed) or LDW *t[idx],r (base, scaled index, r)
+			else if (name.equals("LDW") && (n == 2 || n == 3)) {
 				for (Object o : insn.getOpObjects(0)) {
 					if (o instanceof Register r && entryOf == null) {
 						entryOf = table(program, regs, tableBase, r);
@@ -295,7 +335,10 @@ public class C6000JumpTableAnalyzer extends AbstractAnalyzer {
 				// The guard: CMPLTU K,idx (K < idx) or CMPGTU idx,K (idx > K)
 				// flags an index past K; K may be an immediate or a constant register.
 				Long limit = operandValue(insn, name.equals("CMPLTU") ? 0 : 1, regs);
-				if (limit != null) bound = limit;
+				if (limit != null) {
+					bound = limit;
+					guard = dst == null ? null : dst.getName();
+				}
 			}
 			for (Object written : insn.getResultObjects()) {
 				if (written instanceof Register r) {
@@ -329,6 +372,14 @@ public class C6000JumpTableAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return targets;
+	}
+
+	/** The predicate register of an instruction ("B0", "!B0"), or null. */
+	private static String predicate(Instruction insn) {
+		String name = insn.getMnemonicString();
+		if (name.startsWith("_")) name = name.substring(1);
+		int end = name.indexOf(']');
+		return name.startsWith("[") && end > 0 ? name.substring(1, end) : null;
 	}
 
 	private static Long operandValue(Instruction insn, int index, Map<Register, long[]> regs) {

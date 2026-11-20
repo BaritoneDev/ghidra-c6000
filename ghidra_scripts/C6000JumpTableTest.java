@@ -37,6 +37,16 @@ public class C6000JumpTableTest extends GhidraScript {
 		if (!c.contains("switch") || c.contains("Could not recover jumptable")) {
 			throw new AssertionError("decompiler did not use the switch:\n" + c);
 		}
+		// The table set up before a jump into the dispatch tail; the [B0] write in the jump's
+		// delay slots belongs to the default path and must not replace the base.
+		disassemble(toAddr(0x1200L));
+		Set<Address> viaJump = new TreeSet<>(c6000.C6000JumpTableAnalyzer.switchTargets(
+			currentProgram, getInstructionAt(toAddr(0x1248L))));
+		Set<Address> expectedViaJump = new TreeSet<>();
+		for (long t : new long[] { 0x1260L, 0x1280L, 0x12a0L }) expectedViaJump.add(toAddr(t));
+		if (!viaJump.equals(expectedViaJump)) {
+			throw new AssertionError("dispatch through a jump " + viaJump + ", expected " + expectedViaJump);
+		}
 		println("C6000_JUMP_TABLE_OK");
 	}
 }
