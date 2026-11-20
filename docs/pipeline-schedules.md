@@ -373,12 +373,15 @@ retain the existing resource rejection.
 A separate finite zero/nonzero domain tracks the six predicate GPRs and old-value copy
 aliases. Facts fork on the pre-E1 snapshot, invalidate at actual commit phases, and
 widen at backward transfers and loop-time wraps. A backward branch keeps the truth of a
-register whose every write from the target through the branching packet is predicated
-on itself with a condition false under that truth (`[R]` while zero, `[!R]` while
-nonzero), with no write to it in flight; a predicated instruction whose condition is
-false does not write its destination (SPRUFE8B 3.5). Counter branches retain their actual
-raw taken condition and do not infer predicate truth from a failed sign test. This
-pruning never permits a resource collision or flushes a pending effect early.
+register whose every write from the target through the branching packet is predicated on
+itself with a condition false under that truth (`[R]` while zero, `[!R]` while nonzero),
+with no write to it in flight; a predicated instruction whose condition is false does
+not write its destination (SPRUFE8B 3.5). A predicated constant write that changes a
+predicate register's truth (`[A1] MVK 0,B0`) forks on its own predicate, so the path where
+it ran knows the value and the other keeps the old one. The fork costs states; a schedule
+over the state cap is compiled once more without it before it is refused. Counter branches retain their actual raw taken condition and do
+not infer predicate truth from a failed sign test. This pruning never permits a resource
+collision or flushes a pending effect early.
 
 `loop-counter-proof.py` / `C6000LoopCounterProofTest.java` check known and unknown
 counts, both parallel setup forms, E4 counter visibility and preserved refusals.

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sequential leaf calls, CALLP and saved return links; IMAGE JSON [be].
 Independent synthetic fields: SPRUFE8B 3.5, 3.7, 3.8.10, 4.2.6, CALLP p.172,
-B/register and BNOP/register, compact Scs10 Figure F-19. No firmware bytes.
+B/register and BNOP/register, compact Scs10 Figure F-19, and predicate facts
+from predicated writes and across a backward jump. No firmware bytes.
 """
 from pathlib import Path
 import json,struct,sys
@@ -84,5 +85,25 @@ def main():
   for variant,error in [('collision','simultaneous'),('nop_conflict','multicycle NOP'),('pending_branch','CALLP requires'),('clobber_saved','unresolved register branch'),('late_link','unresolved register branch'),('nonlocal_return','unresolved register branch')]:add(f'callp_s{side}_{variant}',side=side,variant=variant,error=error)
  for variant,error in [('',None),('copy_chain',None),('delay_overwrite',None),('disabled_clobber',None),('delay_late_overwrite',None),('unknown','unresolved register branch'),('overwrite','unresolved register branch'),('conditional','unresolved register branch'),('same_packet','unresolved register branch'),('late','unresolved register branch')]:add('saved_link_'+(variant or 'plain'),'ordinary',variant=variant,error=error)
  for variant,error in [('',None),('distinct',None),('clobber_target','target lacks exact'),('late_target','target lacks exact'),('clobber_alias','unresolved register branch')]:add('multi_'+(variant or 'reuse'),'multi',variant=variant,error=error)
+ def plain(name,words,expected,inputs=None,at=None):
+  # words at the entry, more blocks at offsets from it
+  c=0x1000+len(rows)*0x800;blocks={0:words,**(at or {})}
+  for offset,block in blocks.items():
+   for k,w in enumerate(block):struct.pack_into(endian+'I',image,c+offset-0x1000+4*k,w)
+  rows.append(dict(name=name,mode='plain',caller=c,caller_end=c+max(o+len(b)*4 for o,b in blocks.items()),sites=[],expected=expected,input=inputs or {}))
+ def ret(pred=0):return pred|3<<18|0x362
+ def predicate_write(name,a1,b0):
+  # [A1] MVK 0,B0 ties B0 to A1: where A1 held, B0 is 0 and [B0] B y can't follow the [A1]
+  # return; where it didn't, the return isn't taken. Without the split the return could
+  # land with y pending.
+  c=0x1000+len(rows)*0x800;a1p=4<<29
+  words=[mvk(0,0,2)|a1p,ret(a1p),branch(c+8,c+32)|1<<29,3<<13,0,mvk(7,9),bnop(3)]
+  plain(name,words,{'A9':0 if a1 else 2 if b0 else 7,'B0':0 if a1 else b0,'PC':0x9000},{'A1':a1,'B0':b0},at={32:[mvk(2,9),bnop(3)]})
+ for a1,b0 in [(1,1),(0,1),(0,0)]:predicate_write(f'predicate_write_a{a1}_b{b0}',a1,b0)
+ # [A1] MVK 0,B0 that nothing reads: the split only doubles the states after it. Over a
+ # lowered state cap it compiles again without the split.
+ plain('unrefined_retry',[mvk(0,0,2)|4<<29,mvk(1,8),mvk(2,7),ret(),4<<13],{'A8':1,'A7':2,'PC':0x9000},{'A1':1})
+ rows[-1]['state_cap']=12  # 17 states with the split
+ assert len(rows)*0x800<=len(image)
  Path(sys.argv[1]).write_bytes(image);Path(sys.argv[2]).write_text(json.dumps(rows,indent=2)+'\n')
 if __name__=='__main__':main()
