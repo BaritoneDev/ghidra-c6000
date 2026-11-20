@@ -5,7 +5,8 @@ Independent synthetic fields: SPRUFE8B 3.5, 3.7, 3.8.10, 4.2.6, CALLP p.172,
 B/register and BNOP/register, compact Scs10 Figure F-19, predicate facts from
 predicated writes and across a backward jump, and a load disabled at issue still
 in flight when the return lands; calls to separate functions, tail calls and
-jumps onto another function's entry in ordinary schedules. No firmware bytes.
+jumps onto another function's entry in ordinary schedules, and switches through a
+guarded jump table. No firmware bytes.
 """
 from pathlib import Path
 import json,struct,sys
@@ -168,6 +169,22 @@ def main():
                    # recorded as a plain jump onto f's entry, with back still pending: evidence that
                    # this entry isn't drained, which must not count against calls to f
                    landings=[dict(target=f,jump=True,pending_has='B@')]))
+ def switch(name,pick,outside=False):
+  # The TI dispatch: CMPLTU 1,B4,B0 bounds the index to two entries, [B0]B default,
+  # MVK/MVKH the table into B5, LDW *B5[B4],B4, BNOP.S2 B4. Cases set A9 and return.
+  # The table words sit in the image (for the analysis) and in emulator memory.
+  c=0x1000+len(rows)*0x800;case=[c+40,c+48];default=c+56;table=c+0x100
+  cmpltu=0<<23|4<<18|1<<13|0x5e<<5|0x18|1<<1;ldw=4<<23|5<<18|4<<13|5<<9|1<<7|0x64|1<<1
+  words=[mvk(pick,4,2),cmpltu,branch(c+8,default)|1<<29,mvk(table,5,2),mvk(table>>16,5,2,True),ldw,0,0,1<<13,0x800362|4<<18|5<<13,
+         mvk(1,9),bnop(3),mvk(2,9),bnop(3),mvk(7,9),bnop(3)]
+  entries=[case[0],c+0x400 if outside else case[1]]
+  for k,w in enumerate(words):struct.pack_into(endian+'I',image,c-0x1000+4*k,w)
+  for k,w in enumerate(entries):struct.pack_into(endian+'I',image,table-0x1000+4*k,w)
+  row=dict(name=name,mode='plain',caller=c,caller_end=c+len(words)*4,sites=[],memory={str(table+4*k):w for k,w in enumerate(entries)},
+           expected={'B4':case[pick],'PC':0x9000,'B15':0x8100,'A9':pick+1,'B9':0})
+  if outside:row['refused']='switch target outside any function'
+  rows.append(row)
+ switch('switch_first',0);switch('switch_second',1);switch('switch_outside',0,True)
  unbounded('switch_unbounded_reference')
  separate('separate_untouched',False);separate('separate_clobber',True)
  separate('separate_hole_untouched',False,True);separate('separate_hole_clobber',True,True)

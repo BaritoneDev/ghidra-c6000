@@ -20,6 +20,11 @@
   Jumps from elsewhere into code the body already owns no longer refuse it, since only
   the entry's p-code is replaced; a jump into covered code the activation would absorb
   still does (it would become a shared tail). Reviewed closed-call traces stay strict.
+* Switches in ordinary exact schedules: a register branch is a switch when
+  `C6000 Jump Tables` reads its guarded table from the code, and the landing compares the
+  register with each entry in turn (the guard makes that exhaustive). A `COMPUTED_JUMP`
+  reference alone doesn't make a switch. A target outside any function refuses the
+  schedule.
 * `C6000PipelineCompiler.callLandings()` reports what each call or jump onto another
   entry leaves in flight, as evidence for the callee's own entry.
 

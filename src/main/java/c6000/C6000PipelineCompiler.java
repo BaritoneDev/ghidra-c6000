@@ -1271,7 +1271,7 @@ public final class C6000PipelineCompiler {
                 else{
                     nextBranches.add(new Branch(branch.pc(),branch.age()+1,branch.target(),branch.returns()));
                     if(branch.returns())copy(moves,slot("target",branch.pc(),branch.age()+1,0,4),slot("target",branch.pc(),branch.age(),0,4));
-                    if(closedCall!=null&&closedCalls.containsKey(branch.pc())||branch.target()==INDIRECT_CALL)copy(moves,slot("call_target",branch.pc(),branch.age()+1,0,4),slot("call_target",branch.pc(),branch.age(),0,4));
+                    if(closedCall!=null&&closedCalls.containsKey(branch.pc())||branch.target()==INDIRECT_CALL||branch.target()==SWITCH_JUMP)copy(moves,slot("call_target",branch.pc(),branch.age()+1,0,4),slot("call_target",branch.pc(),branch.age(),0,4));
                 }
             }
             for(var move:moves)move.run();
@@ -1297,6 +1297,16 @@ public final class C6000PipelineCompiler {
                         if(loop!=null){var tsr=program.getRegister("TSR");b.op(PcodeOp.INT_AND,new Varnode(tsr.getAddress(),4),new Varnode(tsr.getAddress(),4),c(0xffffbfffL,4));}
                         b.jump(PcodeOp.BRANCH,"exit",null);continue;
                     }
+                } else if(landing.target()==SWITCH_JUMP){
+                    if(loop!=null||loopStart!=null)throw fail("switch lands inside a loop buffer at "+Long.toHexString(landing.pc()));
+                    var cases=switchTargets(instructions.get(landing.pc()).instruction());var value=slot("call_target",landing.pc(),landing.age(),0,4);
+                    for(int k=0;k<cases.size();k++){
+                        boolean last=k==cases.size()-1;String next="switch_"+b.labelCounter++;
+                        if(!last){var other=temp(1);b.op(PcodeOp.INT_NOTEQUAL,other,value,c(cases.get(k),4));b.jump(PcodeOp.CBRANCH,next,other);}
+                        emitTransfer(s,returnFlow,pack,cases.get(k),idle,nextFlights,nextBranches,hazards,null,issueBranch,captured,issued,false,false);
+                        if(!last)b.label(next);
+                    }
+                    continue;
                 } else if(opaqueLanding(landing,s)&&(marker=opaqueCall(landing,returnFlow,nextFlights,loop!=null||!nextBranches.isEmpty()||issueBranch!=null))!=null){
                     if(landing.target()==INDIRECT_CALL)b.op(PcodeOp.COPY,slot("opaque_target",landing.pc(),0,0,4),slot("call_target",landing.pc(),landing.age(),0,4));
                     recordLanding(landing,nextFlights,hazards,opaqueCalls.get(marker).continuation());
@@ -1401,12 +1411,13 @@ public final class C6000PipelineCompiler {
         // SPRUFE8B B IRP p.155, B NRP p.157: the target is IRP or NRP, neither a register operand nor a displacement.
         if(!call&&register==null&&(instruction.getNumOperands()==0||instruction.getAddress(0)==null))throw fail("unresolved branch target "+instruction);
         // a register branch that isn't a return may be a call: capture its target, decide where it lands
-        boolean indirect=plan==null&&!strictScope()&&traceContract==null&&source.returns().activeCall()==NO_CALL&&register!=null&&!returns&&!call;
-        Long constantTarget=indirect&&linkConstant(origin)?LINK_CONST-origin:null;
-        if(constantTarget!=null)indirect=false;
-        if(register!=null&&!returns&&!call&&!indirect&&constantTarget==null)throw unresolved(instruction);
-        long target=constantTarget!=null?constantTarget:indirect?INDIRECT_CALL:plan!=null?plan.callee().start():returns?0:instruction.getAddress(0).getOffset();
-        if(call||indirect)b.op(PcodeOp.COPY,slot("call_target",at,1,0,4),register==null?c(target,4):captured.get(at).get(register.getAddress().getOffset()));
+        boolean open=plan==null&&!strictScope()&&traceContract==null&&source.returns().activeCall()==NO_CALL&&register!=null&&!returns&&!call;
+        Long constantTarget=open&&linkConstant(origin)?LINK_CONST-origin:null;
+        if(constantTarget!=null)open=false;
+        boolean switchJump=open&&switchTargets(instruction)!=null,indirect=open&&!switchJump;
+        if(register!=null&&!returns&&!call&&!indirect&&!switchJump&&constantTarget==null)throw unresolved(instruction);
+        long target=constantTarget!=null?constantTarget:switchJump?SWITCH_JUMP:indirect?INDIRECT_CALL:plan!=null?plan.callee().start():returns?0:instruction.getAddress(0).getOffset();
+        if(call||indirect||switchJump)b.op(PcodeOp.COPY,slot("call_target",at,1,0,4),register==null?c(target,4):captured.get(at).get(register.getAddress().getOffset()));
         if(callerTail!=null&&!returns){if(!callerTail.callee().contains(target))throw fail("caller-tail callee branch leaves declared scope");validateCallerTailTarget(target);}
         if(returns)b.op(PcodeOp.COPY,slot("target",at,1,0,4),captured.get(at).get(register.getAddress().getOffset()));
         List<Branch> yes=new ArrayList<>(branches);yes.add(new Branch(at,1,target,returns));
@@ -1470,11 +1481,29 @@ public final class C6000PipelineCompiler {
         return f!=null&&!f.equals(function);
     }
     // B3 origins beyond NO_CALL/ENTRY_LINK/call sites: a reload from memory, "not written since the
-    // last call returned", and code addresses built by ADDKPC (LINK_CONST - value).
-    private static final long RESTORED_LINK=-3,STALE_LINK=-5,LINK_CONST=-(1L<<33),INDIRECT_CALL=-0x8000L;
+    // last call returned", and code addresses built by ADDKPC (LINK_CONST - value). A branch
+    // target SWITCH_JUMP marks a register branch through a bounded jump table.
+    private static final long RESTORED_LINK=-3,STALE_LINK=-5,LINK_CONST=-(1L<<33),INDIRECT_CALL=-0x8000L,SWITCH_JUMP=-0x9000L;
     private static boolean linkConstant(Long origin){return origin!=null&&origin<=LINK_CONST&&origin>LINK_CONST-(1L<<32);}
     private IllegalArgumentException unresolved(Instruction branch){
         return fail("unresolved register branch "+branch);
+    }
+    // A register branch is a switch when C6000JumpTableAnalyzer reads its table from the code: a
+    // constant base, a word load from it, and the CMPLTU/CMPGTU guard that bounds the index, so
+    // the targets are exactly the entries the guard allows. The landing compares the branch
+    // register with each target in turn and the last takes what remains, which the guard makes
+    // exhaustive. COMPUTED_JUMP references alone don't make a switch: Ghidra's decompiler adds
+    // unbounded ones (a table read past its end, the address of a function pointer, a single
+    // guessed target), so such a branch is classified like any other register branch.
+    private List<Long> switchTargets(Instruction branch){
+        var entries=C6000JumpTableAnalyzer.targets(program,new C6000CallAnalyzer.Walker(program),branch);
+        if(entries.size()<2)return null;
+        var targets=new TreeSet<Long>();
+        for(var target:entries){
+            if(program.getFunctionManager().getFunctionContaining(target)==null)throw fail("switch target outside any function at "+target);
+            targets.add(target.getOffset());
+        }
+        return List.copyOf(targets);
     }
     private boolean opaqueLanding(Branch landing,State s){
         if(closedCalls.containsKey(landing.pc())||strictScope()||traceContract!=null||s.returns().activeCall()!=NO_CALL)return false;
@@ -1770,7 +1799,7 @@ public final class C6000PipelineCompiler {
         int live=opaqueMarker(pc)?0:livePredicates(pc);
         for(var branch:branches){
             if(branch.returns()||branch.target()==INDIRECT_CALL||otherEntry(branch.target()))continue;
-            live|=livePredicates(branch.target());
+            live|=branch.target()==SWITCH_JUMP?ALL_PREDICATES:livePredicates(branch.target());
         }
         for(var hazard:hazards)if(hazard.pc()>=0){var p=decodeKnown(hazard.pc()).predicate();if(p!=null){int k=predicateIndex(p.getAddress().getOffset());if(k>=0)live|=1<<k;}}
         if(live==ALL_PREDICATES)return facts;
@@ -1781,12 +1810,13 @@ public final class C6000PipelineCompiler {
     }
 
     /** The predicate registers (bit k: A0, A1, A2, B0, B1, B2) code from pc may read before an
-     * unconditional single-cycle write replaces them. Walks execute packets: peers read before
-     * any of them writes; a fallthrough ends when an unconditional branch lands; a register
-     * branch (a return) leaves. A packet the compiler refuses (code that doesn't decode, flow
-     * out of owned code) reads nothing: no schedule that compiles goes through it. A walk over
-     * 4,096 packets reads everything. The walk leaves the compile as it found it: what it
-     * decodes is forgotten again, since selfGuarded() reads only code the compile itself decoded. */
+     * unconditional single-cycle write replaces them. Walks execute packets: peers read before any
+     * of them writes; a fallthrough ends when an unconditional branch lands; a switch goes to its
+     * table's targets; another register branch (a return or a call) leaves. A packet the compiler
+     * refuses (code that doesn't decode, flow out of owned code) reads nothing: no schedule that
+     * compiles goes through it. A walk over 4,096 packets reads everything. The walk leaves the
+     * compile as it found it: what it decodes is forgotten again, since selfGuarded() reads only
+     * code the compile itself decoded. */
     private final Map<Long,Integer> livePredicates=new HashMap<>();
     private record LiveNode(long pc,int budget){}
     private int livePredicates(long pc){
@@ -1814,7 +1844,8 @@ public final class C6000PipelineCompiler {
                     if(!Set.of("B","BNOP","BDEC","BPOS","CALLP").contains(i.name()))continue;
                     redirect|=i.predicate()==null&&!Set.of("BDEC","BPOS").contains(i.name());
                     var ins=i.instruction();
-                    if(ins.getRegister(0)==null&&ins.getNumOperands()>0&&ins.getAddress(0)!=null&&!otherEntry(ins.getAddress(0).getOffset()))successors.add(new LiveNode(ins.getAddress(0).getOffset(),-1));
+                    if(ins.getRegister(0)!=null){var targets=switchTargets(ins);if(targets!=null)for(long t:targets)successors.add(new LiveNode(t,-1));}
+                    else if(ins.getNumOperands()>0&&ins.getAddress(0)!=null&&!otherEntry(ins.getAddress(0).getOffset()))successors.add(new LiveNode(ins.getAddress(0).getOffset(),-1));
                 }
                 // budget: cycles left before a branch already issued lands, -1 when none is pending
                 boolean pending=node.budget()>=0||redirect;
