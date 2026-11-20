@@ -30,6 +30,9 @@
   veneer (`MVK lo,B31; MVKH hi,B31; B B31`) is a direct branch to its constant. A branch
   register is tracked only after a compile was refused on an unresolved branch through
   it; the compile is then tried again.
+* `B IRP` and `B NRP` are returns in ordinary exact schedules, through the control
+  register read when the branch issues. Interrupt and exception handlers were refused
+  for an unresolved branch target.
 * `C6000PipelineCompiler.callLandings()` reports what each call or jump onto another
   entry leaves in flight, as evidence for the callee's own entry.
 

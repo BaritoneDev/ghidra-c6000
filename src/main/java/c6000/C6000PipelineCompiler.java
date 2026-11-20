@@ -1416,8 +1416,14 @@ public final class C6000PipelineCompiler {
         var listed=program.getListing().getInstructionAt(instruction.getAddress());boolean provenCall=listed!=null&&listed.getFlowOverride()==ghidra.program.model.listing.FlowOverride.CALL;
         boolean returns=!call&&register!=null&&(source.returns().activeCall()!=NO_CALL?origin!=null&&origin==source.returns().activeCall():origin!=null&&origin==ENTRY_LINK||register.getName().equals("B3")&&!linkConstant(origin)&&!provenCall);
         if(closedCall!=null&&!call&&register!=null){var active=closedCalls.get(source.returns().activeCall());if(active!=null&&at!=active.calleeReturnPc()||active==null&&!Objects.equals(at,closedCall.callerReturnPc()))throw fail("closed-call undeclared register edge");}
-        // SPRUFE8B B IRP p.155, B NRP p.157: the target is IRP or NRP, neither a register operand nor a displacement.
-        if(!call&&register==null&&(instruction.getNumOperands()==0||instruction.getAddress(0)==null))throw fail("unresolved branch target "+instruction);
+        // SPRUFE8B B IRP p.155, B NRP p.157: the target is IRP or NRP, neither a register operand nor
+        // a displacement. It leaves an interrupt or exception handler: a return through that control
+        // register, read when the branch issues. The SLEIGH constructor has no operand, so the
+        // control register is part of the instruction text.
+        Register controlReturn=null;
+        if(!call&&register==null&&instruction.getNumOperands()==0){var m=java.util.regex.Pattern.compile("\\b(IRP|NRP)$").matcher(instruction.toString().trim());if(m.find())controlReturn=program.getRegister(m.group(1));}
+        if(controlReturn!=null){if(strictScope()||traceContract!=null||source.returns().activeCall()!=NO_CALL)throw fail("interrupt return inside a call contract");returns=true;}
+        if(!call&&register==null&&controlReturn==null&&(instruction.getNumOperands()==0||instruction.getAddress(0)==null))throw fail("unresolved branch target "+instruction);
         // a register branch that isn't a return may be a call: capture its target, decide where it lands
         boolean open=plan==null&&!strictScope()&&traceContract==null&&source.returns().activeCall()==NO_CALL&&register!=null&&!returns&&!call;
         Long constantTarget=open&&linkConstant(origin)?LINK_CONST-origin:null;
@@ -1427,7 +1433,7 @@ public final class C6000PipelineCompiler {
         long target=constantTarget!=null?constantTarget:switchJump?SWITCH_JUMP:indirect?INDIRECT_CALL:plan!=null?plan.callee().start():returns?0:instruction.getAddress(0).getOffset();
         if(call||indirect||switchJump)b.op(PcodeOp.COPY,slot("call_target",at,1,0,4),register==null?c(target,4):captured.get(at).get(register.getAddress().getOffset()));
         if(callerTail!=null&&!returns){if(!callerTail.callee().contains(target))throw fail("caller-tail callee branch leaves declared scope");validateCallerTailTarget(target);}
-        if(returns)b.op(PcodeOp.COPY,slot("target",at,1,0,4),captured.get(at).get(register.getAddress().getOffset()));
+        if(returns)b.op(PcodeOp.COPY,slot("target",at,1,0,4),controlReturn!=null?arch(controlReturn.getAddress().getOffset(),4):captured.get(at).get(register.getAddress().getOffset()));
         List<Branch> yes=new ArrayList<>(branches);yes.add(new Branch(at,1,target,returns));
         if(Set.of("BDEC","BPOS").contains(issueBranch.name())) {
             // A failed counter test says nothing about the instruction predicate.

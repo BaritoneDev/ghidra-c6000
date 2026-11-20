@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""B IRP / B NRP in an exact schedule: no register or displacement target, refused (SPRUFE8B pp.155, 157).
+"""B IRP / B NRP in an exact schedule: a return through that control register (SPRUFE8B pp.155, 157).
 IMAGE CASES.json [be]. Words are TI cl6x 8.3.15 output (-mv6740 --no_compress), no firmware bytes:
 
   1000 birp   B .S2 IRP ; NOP 5
@@ -25,8 +25,10 @@ def main():
     for entry, words in WORDS.items():
         for i, w in enumerate(words):
             struct.pack_into(endian + "I", image, entry - 0x1000 + 4 * i, w)
-    rows = [dict(name=name, entry=entry, refused="unresolved branch target")
-            for name, entry in (("birp", 0x1000), ("bnrp", 0x1040), ("pirp", 0x1080), ("pnrp", 0x10C0))]
+    # each returns to its register's value, the predicated ones taken
+    rows = [dict(name=name, entry=entry, input={register: 0x9100, "B0": b0}, expected={"PC": 0x9100})
+            for name, entry, register, b0 in (("birp", 0x1000, "IRP", 0), ("bnrp", 0x1040, "NRP", 0),
+                                               ("pirp", 0x1080, "IRP", 1), ("pnrp", 0x10C0, "NRP", 0))]
     rows.append(dict(name="ret", entry=0x1100, input={"B3": 0x9000, "A4": 0x4444}, expected={"A4": 0x22, "PC": 0x9000}))
     Path(sys.argv[1]).write_bytes(image)
     Path(sys.argv[2]).write_text(json.dumps(rows, indent=2) + "\n")

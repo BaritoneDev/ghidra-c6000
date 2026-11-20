@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // @category C6000
-// SPRUFE8B B IRP p.155, B NRP p.157: a pointer branch has no target the schedule can name; refused.
+// SPRUFE8B B IRP p.155, B NRP p.157: a return through the control register, read at issue.
 import ghidra.app.script.GhidraScript;
 import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.plugin.processors.sleigh.SleighLanguage;
@@ -28,6 +28,6 @@ public class C6000PipelinePointerBranchTest extends GhidraScript {
             for(var expected:row.getAsJsonObject("expected").entrySet())equal(expected.getValue().getAsLong(),value(state,expected.getKey()),row.get("name")+" "+expected.getKey());
             count++;
         }
-        equal(1,count,"scheduled return");equal(4,refused,"pointer branches");println("C6000_PIPELINE_POINTER_BRANCH_OK cases="+count+" refused="+refused);
+        equal(5,count,"scheduled returns");equal(0,refused,"refusals");println("C6000_PIPELINE_POINTER_BRANCH_OK cases="+count+" refused="+refused);
     }
 }
