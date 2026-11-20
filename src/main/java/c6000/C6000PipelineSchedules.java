@@ -355,7 +355,7 @@ public final class C6000PipelineSchedules {
     private static void includeFunctionScope(Program program, Function function,
             C6000PipelineCompiler.Result schedule) throws Exception {
         if (!closedCalls(program, function).isEmpty()) return;
-        var body = new AddressSet(function.getBody());body.add(schedule.covered());function.setBody(body);
+        var body = new AddressSet(function.getBody());body.add(C6000PipelineContracts.ownCovered(program, function, schedule.covered()));function.setBody(body);
     }
 
     /** Explicitly return to ordinary instruction lifting; preserve listing annotations and scope. */

@@ -59,8 +59,11 @@ public final class C6000PipelineCompiler {
             // the same retries as compile()
             if(widenDrained>0||!refine||lastTry||!oversize(e))throw e;
             for(int level=0;level<=4;level++){
-                try{return relaxed(level).compileStoreTail(contract);}
+                var retry=relaxed(level);StoreTailResult result;
+                try{result=retry.compileStoreTail(contract);}
                 catch(IllegalArgumentException again){if(level<4&&(level==0||level==3||oversize(again)))continue;if(level<3){level=2;continue;}throw e;}
+                callLandings.clear();callLandings.addAll(retry.callLandings);
+                return result;
             }
             throw e;
         }
@@ -608,8 +611,12 @@ public final class C6000PipelineCompiler {
             if(owner==null&&!traceContract.allowUnownedWindow())throw fail("caller continuation has unowned code at "+at);
         }
         if(program.getListing().getDefinedDataContaining(at)!=null)throw fail("scheduled code conflicts with defined data at "+at);
-        if(owner!=null&&!owner.equals(function)&&!callerPc(pc)&&!strictScope())throw fail("flow enters another function at "+at);
-        if(!strictScope()&&!callerPc(pc)&&(pc>function.getBody().getMaxAddress().getOffset()+254||pc<function.getBody().getMinAddress().getOffset()))throw fail("flow leaves owned code at "+at);
+        // Code another function owns, reached by a jump or by falling through (a shared epilogue, a
+        // stub that runs on into the next function), is compiled into an ordinary schedule;
+        // branches to another function's entry became calls before they get here. A trace
+        // contract describes its own code only, so it still refuses that flow.
+        if(traceContract!=null&&owner!=null&&!owner.equals(function)&&!callerPc(pc)&&!strictScope())throw fail("flow enters another function at "+at);
+        if(!strictScope()&&!callerPc(pc)&&owner==null&&(pc>function.getBody().getMaxAddress().getOffset()+254||pc<function.getBody().getMinAddress().getOffset()))throw fail("flow leaves owned code at "+at);
         int physicalLength=!strictScope()?0:closedPhysicalLength(at);
         var context=new ProcessorContextImpl(program.getLanguage());
         var value=program.getProgramContext().getRegisterValue(program.getLanguage().getContextBaseRegister(),at);
@@ -1027,8 +1034,11 @@ public final class C6000PipelineCompiler {
             // pending, then with the caps raised, refined and merged
             if(widenDrained>0||!refine||lastTry||!oversize(e))throw e;
             for(int level=0;level<=4;level++){
-                try{return relaxed(level).compileInternal();}
+                var retry=relaxed(level);Result result;
+                try{result=retry.compileInternal();}
                 catch(IllegalArgumentException again){if(level<4&&(level==0||level==3||oversize(again)))continue;if(level<3){level=2;continue;}throw e;}
+                callLandings.clear();callLandings.addAll(retry.callLandings);
+                return result;
             }
             throw e;
         }
@@ -1063,6 +1073,7 @@ public final class C6000PipelineCompiler {
                 if(!s.flights().isEmpty()||!s.branches().isEmpty()||s.loop()!=null)throw fail("store-tail endpoint still has pending effects");
                 b.jump(PcodeOp.BRANCH,"exit",null);continue;
             }
+            if(opaqueMarker(s.pc())&&s.idle()==0){emitOpaqueCall(s);continue;}
             if(closedCall!=null&&closedCall.stopPc()!=null&&s.pc()==closedCall.stopPc()&&s.idle()==0){closeClosedTrace(s);continue;}
             if(closedCall!=null&&s.idle()==0&&!closedPackets.contains(s.pc()))throw fail("closed-call entered undeclared packet");
             if(traceContract!=null&&s.pc()==traceContract.stopPc()&&s.idle()==0){closeTrace(s);continue;}
@@ -1167,7 +1178,7 @@ public final class C6000PipelineCompiler {
                 span=Math.max(span,i.span());
                 if(Set.of("B","BNOP","BDEC","BPOS","CALLP").contains(i.name())){
                     if(issueBranch!=null)throw fail("multiple branches in a packet");
-                    if(i.name().equals("CALLP")&&(!s.branches().isEmpty()||s.returns().activeCall()!=NO_CALL||loop!=null))throw fail("CALLP requires no pending branch or nested invocation");
+                    if(i.name().equals("CALLP")&&(!s.branches().isEmpty()||s.returns().activeCall()!=NO_CALL||loop!=null))throw fail("CALLP requires no pending branch or nested invocation at "+Long.toHexString(pc)+(s.branches().isEmpty()?"":" (branch from "+Long.toHexString(s.branches().get(0).pc())+" pending)"));
                     issueBranch=i;
                 }
             }
@@ -1260,11 +1271,12 @@ public final class C6000PipelineCompiler {
                 else{
                     nextBranches.add(new Branch(branch.pc(),branch.age()+1,branch.target(),branch.returns()));
                     if(branch.returns())copy(moves,slot("target",branch.pc(),branch.age()+1,0,4),slot("target",branch.pc(),branch.age(),0,4));
-                    if(closedCall!=null&&closedCalls.containsKey(branch.pc()))copy(moves,slot("call_target",branch.pc(),branch.age()+1,0,4),slot("call_target",branch.pc(),branch.age(),0,4));
+                    if(closedCall!=null&&closedCalls.containsKey(branch.pc())||branch.target()==INDIRECT_CALL)copy(moves,slot("call_target",branch.pc(),branch.age()+1,0,4),slot("call_target",branch.pc(),branch.age(),0,4));
                 }
             }
             for(var move:moves)move.run();
             ReturnFlow returnFlow=advanceReturnFlow(s,pack);
+            Long marker;
             if(landing!=null){
                 idle=0;
                 if(landing.returns()){
@@ -1285,6 +1297,10 @@ public final class C6000PipelineCompiler {
                         if(loop!=null){var tsr=program.getRegister("TSR");b.op(PcodeOp.INT_AND,new Varnode(tsr.getAddress(),4),new Varnode(tsr.getAddress(),4),c(0xffffbfffL,4));}
                         b.jump(PcodeOp.BRANCH,"exit",null);continue;
                     }
+                } else if(opaqueLanding(landing,s)&&(marker=opaqueCall(landing,returnFlow,nextFlights,loop!=null||!nextBranches.isEmpty()||issueBranch!=null))!=null){
+                    if(landing.target()==INDIRECT_CALL)b.op(PcodeOp.COPY,slot("opaque_target",landing.pc(),0,0,4),slot("call_target",landing.pc(),landing.age(),0,4));
+                    recordLanding(landing,nextFlights,hazards,opaqueCalls.get(marker).continuation());
+                    nextPc=marker;
                 } else {
                     var plan=closedCalls.get(landing.pc());boolean call=plan!=null||decode(landing.pc()).name().equals("CALLP");
                     if(call){
@@ -1292,9 +1308,21 @@ public final class C6000PipelineCompiler {
                         if(plan!=null)closedBoundary("CALL_ENTER",landing,nextFlights,hazards,plan);
                         var links=new HashMap<>(returnFlow.links());if(plan!=null&&!decode(landing.pc()).name().equals("CALLP"))links.put(callLinkRegister(decode(landing.pc())).getAddress().getOffset(),landing.pc());returnFlow=new ReturnFlow(landing.pc(),Map.copyOf(links));
                     }else if(closedCall!=null&&!closedInternalBranches.contains(landing.pc()))throw fail("closed-call undeclared direct landing");
+                    // A plain jump onto another function's entry runs that code here, but what is in
+                    // flight as it enters is evidence for that function's own schedule too (a block
+                    // Ghidra split off its function). Branches still pending or a running loop are
+                    // listed with it: such an entry isn't drained.
+                    if(!call&&landing.target()>=0&&!strictScope()&&traceContract==null&&otherEntry(landing.target())){
+                        var control=new ArrayList<String>();
+                        for(var other:nextBranches)control.add("B@"+Long.toHexString(other.pc()));
+                        if(issueBranch!=null)control.add("B@"+Long.toHexString(issueBranch.instruction().getAddress().getOffset()));
+                        if(loop!=null)control.add("SPLOOP@"+Long.toHexString(loop.start()));
+                        recordLanding(landing,nextFlights,hazards,null,control,true);
+                    }
                     nextPc=landing.target();
                 }
             }
+            if(opaqueMarker(nextPc))idle=drain(nextFlights);
             // SPRUFE8B 7.14: a taken branch idles a non-reloading buffer
             // after its five delay slots. Effects already issued still mature.
             boolean loopRedirect=landing!=null;
@@ -1362,15 +1390,23 @@ public final class C6000PipelineCompiler {
         if(issueBranch==null){emitFactTransfer(source,returnFlow,pack,pc,idle,flights,branches,hazards,loop,source.facts());return;}
         var instruction=issueBranch.instruction();long at=instruction.getAddress().getOffset();var register=instruction.getRegister(0);var plan=closedCalls.get(at);boolean call=plan!=null||issueBranch.name().equals("CALLP");
         Long origin=register==null?null:source.returns().links().get(register.getAddress().getOffset());
-        // A B B3 the call analyzer proved a call is not a return; without a closed-call plan it is refused (issue #39).
+        // B B3 holding an ADDKPC constant this function wrote is no return: a jump to that address
+        // (a function calls code inside another one with the link set in an overlapping branch's
+        // slots, and that code's B B3 comes back to the ADDKPC address)
+        // A B B3 the call analyzer proved a call is not a return either (issue #39); it is then a
+        // call through a register like any other
         var listed=program.getListing().getInstructionAt(instruction.getAddress());boolean provenCall=listed!=null&&listed.getFlowOverride()==ghidra.program.model.listing.FlowOverride.CALL;
-        boolean returns=!call&&register!=null&&(source.returns().activeCall()!=NO_CALL?origin!=null&&origin==source.returns().activeCall():origin!=null&&origin==ENTRY_LINK||register.getName().equals("B3")&&!provenCall);
+        boolean returns=!call&&register!=null&&(source.returns().activeCall()!=NO_CALL?origin!=null&&origin==source.returns().activeCall():origin!=null&&origin==ENTRY_LINK||register.getName().equals("B3")&&!linkConstant(origin)&&!provenCall);
         if(closedCall!=null&&!call&&register!=null){var active=closedCalls.get(source.returns().activeCall());if(active!=null&&at!=active.calleeReturnPc()||active==null&&!Objects.equals(at,closedCall.callerReturnPc()))throw fail("closed-call undeclared register edge");}
-        if(register!=null&&!returns&&!call)throw fail("unresolved register branch "+instruction);
         // SPRUFE8B B IRP p.155, B NRP p.157: the target is IRP or NRP, neither a register operand nor a displacement.
-        if(plan==null&&!returns&&instruction.getAddress(0)==null)throw fail("unresolved branch target "+instruction);
-        long target=plan!=null?plan.callee().start():returns?0:instruction.getAddress(0).getOffset();
-        if(call)b.op(PcodeOp.COPY,slot("call_target",at,1,0,4),register==null?c(target,4):captured.get(at).get(register.getAddress().getOffset()));
+        if(!call&&register==null&&(instruction.getNumOperands()==0||instruction.getAddress(0)==null))throw fail("unresolved branch target "+instruction);
+        // a register branch that isn't a return may be a call: capture its target, decide where it lands
+        boolean indirect=plan==null&&!strictScope()&&traceContract==null&&source.returns().activeCall()==NO_CALL&&register!=null&&!returns&&!call;
+        Long constantTarget=indirect&&linkConstant(origin)?LINK_CONST-origin:null;
+        if(constantTarget!=null)indirect=false;
+        if(register!=null&&!returns&&!call&&!indirect&&constantTarget==null)throw unresolved(instruction);
+        long target=constantTarget!=null?constantTarget:indirect?INDIRECT_CALL:plan!=null?plan.callee().start():returns?0:instruction.getAddress(0).getOffset();
+        if(call||indirect)b.op(PcodeOp.COPY,slot("call_target",at,1,0,4),register==null?c(target,4):captured.get(at).get(register.getAddress().getOffset()));
         if(callerTail!=null&&!returns){if(!callerTail.callee().contains(target))throw fail("caller-tail callee branch leaves declared scope");validateCallerTailTarget(target);}
         if(returns)b.op(PcodeOp.COPY,slot("target",at,1,0,4),captured.get(at).get(register.getAddress().getOffset()));
         List<Branch> yes=new ArrayList<>(branches);yes.add(new Branch(at,1,target,returns));
@@ -1398,14 +1434,212 @@ public final class C6000PipelineCompiler {
 
     private static List<Flight> live(List<Flight> flights){return flights.stream().filter(f->f.predicateTruth()!=0).toList();}
 
+    // ---- calls kept as calls (opaque calls)
+    // In an ordinary schedule a branch that lands on another function's entry, or a register branch
+    // that isn't a return, is a call when B3 holds a return address: a CALLP link or an ADDKPC
+    // constant written on this path (ReturnFlow tracks it like the entry link). It lands on a marker
+    // state: effects still in flight finish in idle cycles (the callee is taken to start after
+    // them), then a p-code CALL/CALLIND is emitted and the schedule continues at the return address
+    // with nothing pending (the callee is taken to return drained, as compiled code does). With B3
+    // still the entry link, or reloaded in the window, a direct branch is a tail call: CALL, then
+    // return. With B3 not written since the last call it is a plain jump into the other function's
+    // code, which is then compiled into this schedule.
+    private record OpaqueCall(long site,Long target,Long continuation){}
+    /** What a call leaves for its callee on one path: the instructions still in flight when the
+     * branch lands (the schedule finishes them first), as NAME@pc+age, and the registers written in the last cycle,
+     * which can stall an X-path read in the callee's first packet. Evidence for the callee's entry.
+     * The continuation is the return address, null for a tail call or a plain jump; jump marks a
+     * plain jump onto the entry (that code runs in this schedule). */
+    public record CallLanding(long site,Long target,List<String> pending,Set<String> e1Writes,Long continuation,boolean jump){}
+    private final Set<CallLanding> callLandings=new LinkedHashSet<>();
+    public List<CallLanding> callLandings(){return List.copyOf(callLandings);}
+    private void recordLanding(Branch landing,List<Flight> flights,List<Hazard> hazards,Long continuation){recordLanding(landing,flights,hazards,continuation,List.of(),false);}
+    private void recordLanding(Branch landing,List<Flight> flights,List<Hazard> hazards,Long continuation,List<String> control,boolean jump){
+        // flights whose predicate is known false on this path don't execute; +age is the cycles
+        // since issue (1: issued in the last delay slot), so the callee can tell when each lands
+        var pending=new ArrayList<String>(control);for(var f:flights)if(f.predicateTruth()!=0)pending.add(instructions.get(f.pc()).name()+"@"+Long.toHexString(f.pc())+"+"+f.age());
+        var writes=new TreeSet<String>();
+        for(var h:hazards)for(long off:h.registers()){var r=program.getRegister(program.getAddressFactory().getRegisterSpace().getAddress(off),4);if(r!=null)writes.add(r.getName());}
+        callLandings.add(new CallLanding(landing.pc(),landing.target()==INDIRECT_CALL?null:landing.target(),List.copyOf(pending),Set.copyOf(writes),continuation,jump));
+    }
+    private static final long OPAQUE_CALL_PC=-0x10000L;
+    private final Map<Long,OpaqueCall> opaqueCalls=new LinkedHashMap<>();
+    private boolean opaqueMarker(long pc){return opaqueCalls.containsKey(pc);}
+    private boolean otherEntry(long target){
+        var f=program.getFunctionManager().getFunctionAt(entry.getNewAddress(target));
+        return f!=null&&!f.equals(function);
+    }
+    // B3 origins beyond NO_CALL/ENTRY_LINK/call sites: a reload from memory, "not written since the
+    // last call returned", and code addresses built by ADDKPC (LINK_CONST - value).
+    private static final long RESTORED_LINK=-3,STALE_LINK=-5,LINK_CONST=-(1L<<33),INDIRECT_CALL=-0x8000L;
+    private static boolean linkConstant(Long origin){return origin!=null&&origin<=LINK_CONST&&origin>LINK_CONST-(1L<<32);}
+    private IllegalArgumentException unresolved(Instruction branch){
+        return fail("unresolved register branch "+branch);
+    }
+    private boolean opaqueLanding(Branch landing,State s){
+        if(closedCalls.containsKey(landing.pc())||strictScope()||traceContract!=null||s.returns().activeCall()!=NO_CALL)return false;
+        return landing.target()==INDIRECT_CALL||otherEntry(landing.target());
+    }
+    /** The marker state for a call landing now, or null when a direct branch is a plain jump (B3 not
+     * written since the last call). The return address is B3's origin after this cycle: an ADDKPC
+     * constant is a call, the entry link or a reload in flight a tail call. With other control
+     * effects pending (a branch in the delay slots, a loop buffer) the schedule can't stop at a
+     * marker: a direct branch is then compiled as a plain jump, which is exact whatever B3 holds
+     * (the target's code joins this schedule until the pending branch redirects it, within the
+     * p-code size cap); a register target is refused. */
+    private Long opaqueCall(Branch landing,ReturnFlow returnFlow,List<Flight> flights,boolean pending){
+        var branch=instructions.get(landing.pc());boolean direct=landing.target()!=INDIRECT_CALL;
+        long b3=program.getRegister("B3").getAddress().getOffset();
+        Long continuation;
+        if(pending&&direct&&!branch.name().equals("CALLP"))return null;
+        if(branch.name().equals("CALLP"))continuation=callpContinuation(branch);
+        else{
+            Long origin=returnFlow.links().get(b3);
+            for(var f:flights){var i=instructions.get(f.pc());if(i.load()&&f.predicateTruth()!=0&&i.outputs().stream().anyMatch(d->d.offset()==b3&&d.size()==4))origin=RESTORED_LINK;}
+            if(linkConstant(origin))continuation=LINK_CONST-origin;
+            else if(direct&&origin!=null&&origin==STALE_LINK)return null;
+            else if(direct&&origin!=null&&(origin==ENTRY_LINK||origin==RESTORED_LINK))continuation=null;
+            else if(!direct&&origin!=null&&(origin==ENTRY_LINK||origin==RESTORED_LINK)&&loadedTarget(branch))continuation=null;
+            else if(!direct)throw unresolved(branch.instruction());
+            else throw fail("call without a provable return address at "+branch.instruction().getAddress());
+        }
+        if(pending&&direct)return null;
+        if(pending)throw fail("call lands with other control effects pending at "+Long.toHexString(landing.pc())+" ("+(direct?"direct":"through a register")+", returns to "+(continuation==null?"the caller":Long.toHexString(continuation))+")");
+        if(continuation!=null&&program.getFunctionManager().getFunctionContaining(entry.getNewAddress(continuation))==null)throw fail("call returns outside any function at "+branch.instruction().getAddress()+" (return address "+Long.toHexString(continuation)+")");
+        var call=new OpaqueCall(landing.pc(),direct?Long.valueOf(landing.target()):null,continuation);
+        for(var e:opaqueCalls.entrySet())if(e.getValue().equals(call))return e.getKey();
+        long marker=OPAQUE_CALL_PC-opaqueCalls.size();opaqueCalls.put(marker,call);return marker;
+    }
+    /** The branch register was last written by an LDW: a pointer fetched from memory (a tail call
+     * through a table entry). Or Ghidra's constant propagation resolved it to a function entry
+     * (a trampoline: MVK/MVKH into a register, then B). An unknown register value stays an
+     * unresolved branch. */
+    private boolean loadedTarget(Insn branch){
+        for(var r:program.getReferenceManager().getReferencesFrom(branch.instruction().getAddress()))
+            if(r.getReferenceType().isCall()&&program.getFunctionManager().getFunctionAt(r.getToAddress())!=null)return true;
+        var register=branch.instruction().getRegister(0);if(register==null)return false;
+        var listing=program.getListing();var at=branch.instruction().getAddress();
+        for(int k=0;k<24;k++){
+            var previous=listing.getInstructionBefore(at);if(previous==null)return false;at=previous.getAddress();
+            for(Object o:previous.getResultObjects())if(o instanceof Register r&&r.contains(register))
+                return previous.getMnemonicString().replaceAll("^_|\\[!?\\w+\\]|_","").startsWith("LDW");
+        }
+        return false;
+    }
+    private int drain(List<Flight> flights){
+        int n=0;for(var f:flights)n=Math.max(n,instructions.get(f.pc()).latency()-f.age());return n;
+    }
+    private void emitOpaqueCall(State s){
+        if(!s.flights().isEmpty()||!s.branches().isEmpty())throw fail("call marker reached with pending effects");
+        var call=opaqueCalls.get(s.pc());
+        // a tail call returns where B3 pointed at the branch: a callee that returns through a copy
+        // of its link may leave B3 at one of its own calls' return points
+        Varnode link=call.continuation()==null?slot("tail_link",call.site(),0,0,4):null;
+        if(link!=null)b.op(PcodeOp.COPY,link,arch(program.getRegister("B3").getAddress().getOffset(),4));
+        if(call.target()==null)b.op(PcodeOp.CALLIND,null,slot("opaque_target",call.site(),0,0,4));
+        else b.op(PcodeOp.CALL,null,new Varnode(entry.getNewAddress(call.target()),4));
+        if(link!=null){
+            b.op(PcodeOp.COPY,new Varnode(program.getRegister("C6000_PIPE_RET").getAddress(),4),link);
+            b.jump(PcodeOp.BRANCH,"exit",null);return;
+        }
+        // copies of the entry link survive in callee-saved registers, and in any register the
+        // callee's code never writes (the TI compiler allocates registers across calls with -pm)
+        var links=new HashMap<Long,Long>();var untouched=call.target()==null?null:calleeWrites(call.target());
+        for(var e:s.returns().links().entrySet()){
+            var r=program.getRegister(program.getAddressFactory().getRegisterSpace().getAddress(e.getKey()),4);
+            if(r!=null&&(r.getName().matches("[AB]1[0-5]")||untouched!=null&&!untouched.contains(e.getKey())))links.put(e.getKey(),e.getValue());
+        }
+        links.put(program.getRegister("B3").getAddress().getOffset(),STALE_LINK);
+        b.jump(PcodeOp.BRANCH,"node"+state(new State(call.continuation(),0,List.of(),List.of(),List.of(),null,PredicateFacts.unknown(),new ReturnFlow(NO_CALL,Map.copyOf(links)))),null);
+    }
+
+    /** Register offsets the code reachable from a function entry may write: its own body, every
+     * function it calls or branches into, transitively. Null when that can't be bounded (a body
+     * that isn't all disassembled, a register branch other than a return through B3, flow into
+     * code no function owns). */
+    private final Map<Long,Optional<Set<Long>>> calleeWrites=new HashMap<>();
+    private Set<Long> calleeWrites(long target){
+        var known=calleeWrites.get(target);if(known!=null)return known.orElse(null);
+        var writes=new HashSet<Long>();var seen=new HashSet<Function>();var work=new ArrayDeque<Function>();
+        var start=program.getFunctionManager().getFunctionAt(entry.getNewAddress(target));
+        boolean bounded=start!=null;if(bounded){seen.add(start);work.add(start);}
+        var listing=program.getListing();var refs=program.getReferenceManager();
+        while(bounded&&!work.isEmpty()){
+            var f=work.poll();var body=bodyInstructions(f);
+            if(body==null){bounded=false;break;}
+            for(var i:body){
+                for(Object o:i.getResultObjects())if(o instanceof Register r)
+                    for(String bank:List.of("A","B"))for(int k=0;k<32;k++){var g=program.getRegister(bank+k);if(r.contains(g)||g.contains(r))writes.add(g.getAddress().getOffset());}
+                var register=i.getRegister(0);String m=i.getMnemonicString().replaceAll("^_|\\[!?\\w+\\]|_","");
+                if(register!=null&&m.matches("(B|BNOP)\\..*")&&!register.getName().equals("B3")&&!resolvedTargets(i)&&!onlyCopiesOfB3(body,register)){bounded=false;break;}
+                var targets=new ArrayList<Address>();
+                if(!(i instanceof PseudoInstruction))for(var r:refs.getReferencesFrom(i.getAddress())){if(r.getReferenceType().isFlow())targets.add(r.getToAddress());}
+                else targets.addAll(Arrays.asList(i.getFlows()));
+                for(var to:targets){
+                    if(f.getBody().contains(to))continue;
+                    var g=program.getFunctionManager().getFunctionContaining(to);
+                    if(g==null){bounded=false;break;}
+                    if(seen.add(g))work.add(g);
+                }
+                if(!bounded)break;
+            }
+        }
+        var result=bounded?Set.copyOf(writes):null;calleeWrites.put(target,Optional.ofNullable(result));return result;
+    }
+    /** A function body's instructions. Bytes Ghidra left undisassembled inside it (code in another
+     * branch's delay slots, where its disassembler stops) are decoded here when they decode
+     * completely to their end; defined data, or bytes that don't decode, give null. */
+    private List<Instruction> bodyInstructions(Function f){
+        var listing=program.getListing();var result=new ArrayList<Instruction>();var holes=new AddressSet();
+        for(var u:listing.getCodeUnits(f.getBody(),true)){
+            if(u instanceof Instruction i)result.add(i);
+            else if(u instanceof Data d&&!d.isDefined())holes.add(d.getMinAddress(),d.getMaxAddress());
+            else return null;
+        }
+        var pseudo=new ghidra.app.util.PseudoDisassembler(program);
+        for(var range:holes){
+            var at=range.getMinAddress();
+            while(at.compareTo(range.getMaxAddress())<=0){
+                Instruction i;try{i=pseudo.disassemble(at);}catch(Exception e){i=null;}
+                if(i==null)return null;
+                result.add(i);at=at.add(i.getLength());
+            }
+            if(!at.equals(range.getMaxAddress().next()))return null;
+        }
+        return result;
+    }
+    /** Every write to the register in the function copies B3 (MV B3,r or OR 0,B3,r): a branch
+     * through it is that function's return. */
+    private boolean onlyCopiesOfB3(List<Instruction> body,Register register){
+        boolean any=false;
+        for(var i:body)for(Object o:i.getResultObjects())if(o instanceof Register r&&(r.contains(register)||register.contains(r))){
+            String m=i.getMnemonicString().replaceAll("^_|\\[!?\\w+\\]|_","").replaceAll("\\..*","");
+            int n=i.getNumOperands();Register source=null;
+            if(m.equals("MV")&&n==2)source=i.getRegister(0);
+            if(m.equals("OR")&&n==3)for(int zero=0;zero<2;zero++){var scalar=i.getScalar(zero);if(scalar!=null&&scalar.getValue()==0)source=i.getRegister(1-zero);}
+            if(source==null||!source.getName().equals("B3"))return false;
+            any=true;
+        }
+        return any;
+    }
+    private boolean resolvedTargets(Instruction i){
+        for(var r:program.getReferenceManager().getReferencesFrom(i.getAddress()))if(r.getReferenceType().isComputed())return true;
+        return false;
+    }
+
     private long callpContinuation(Insn call){
         var link=callLinkRegister(call);Long value=C6000LoopCounterProof.constantOutput(program.getLanguage(),call.raw(),link.getAddress().getOffset(),4);
         if(value==null)throw fail("CALLP lacks exact E1 link proof");return value&0xffffffffL;
     }
     private ReturnFlow advanceReturnFlow(State source,List<Insn> pack){
         var before=source.returns().links();var after=new HashMap<>(before);var written=new HashSet<Long>();
-        for(var flight:source.flights())if(flight.predicateTruth()!=0){var instruction=decodeKnown(flight.pc());for(var d:instruction.outputs())if(d.phase()==flight.age()+1)forgetReturnOutput(after,written,d,null,false);}
+        long b3=program.getRegister("B3").getAddress().getOffset();
+        for(var flight:source.flights())if(flight.predicateTruth()!=0){var instruction=decodeKnown(flight.pc());for(var d:instruction.outputs())if(d.phase()==flight.age()+1){
+            // an unconditional LDW into B3 is the epilogue's reload of the return address
+            boolean reload=instruction.name().equals("LDW")&&flight.predicateTruth()==1&&d.offset()==b3&&d.size()==4;
+            forgetReturnOutput(after,written,d,reload?Long.valueOf(RESTORED_LINK):null,reload);}}
         for(var instruction:pack){int truth=predicateTruth(instruction,source.facts());if(truth==0)continue;var copied=copiedSource(instruction);Long origin=copied==null?null:before.get(copied.getAddress().getOffset());if(instruction.name().equals("CALLP"))origin=instruction.instruction().getAddress().getOffset();
+            if(instruction.name().equals("ADDKPC")&&!instruction.outputs().isEmpty()){Long k=C6000LoopCounterProof.constantOutput(program.getLanguage(),instruction.raw(),instruction.outputs().get(0).offset(),4);origin=k==null?null:LINK_CONST-(k&0xffffffffL);}
             for(var d:instruction.outputs())if(d.phase()==1){Long value=d.size()==4&&d.mask()==-1&&d.sourceWrite()<0?origin:null;if(truth<0&&!Objects.equals(before.get(d.offset()),value))value=null;forgetReturnOutput(after,written,d,value,true);}
         }
         return new ReturnFlow(source.returns().activeCall(),Map.copyOf(after));
@@ -1533,8 +1767,11 @@ public final class C6000PipelineCompiler {
     private static final int ALL_PREDICATES=0x3f;
     private PredicateFacts forgetDead(PredicateFacts facts,long pc,List<Branch> branches,List<Hazard> hazards,int[] flightTokens){
         if(strictScope()||traceContract!=null)return facts;
-        int live=livePredicates(pc);
-        for(var branch:branches)if(!branch.returns())live|=livePredicates(branch.target());
+        int live=opaqueMarker(pc)?0:livePredicates(pc);
+        for(var branch:branches){
+            if(branch.returns()||branch.target()==INDIRECT_CALL||otherEntry(branch.target()))continue;
+            live|=livePredicates(branch.target());
+        }
         for(var hazard:hazards)if(hazard.pc()>=0){var p=decodeKnown(hazard.pc()).predicate();if(p!=null){int k=predicateIndex(p.getAddress().getOffset());if(k>=0)live|=1<<k;}}
         if(live==ALL_PREDICATES)return facts;
         var kept=new HashSet<Integer>();for(int token:flightTokens)kept.add(token);
@@ -1577,7 +1814,7 @@ public final class C6000PipelineCompiler {
                     if(!Set.of("B","BNOP","BDEC","BPOS","CALLP").contains(i.name()))continue;
                     redirect|=i.predicate()==null&&!Set.of("BDEC","BPOS").contains(i.name());
                     var ins=i.instruction();
-                    if(ins.getRegister(0)==null&&ins.getNumOperands()>0&&ins.getAddress(0)!=null)successors.add(new LiveNode(ins.getAddress(0).getOffset(),-1));
+                    if(ins.getRegister(0)==null&&ins.getNumOperands()>0&&ins.getAddress(0)!=null&&!otherEntry(ins.getAddress(0).getOffset()))successors.add(new LiveNode(ins.getAddress(0).getOffset(),-1));
                 }
                 // budget: cycles left before a branch already issued lands, -1 when none is pending
                 boolean pending=node.budget()>=0||redirect;

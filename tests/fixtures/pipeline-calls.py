@@ -4,7 +4,8 @@
 Independent synthetic fields: SPRUFE8B 3.5, 3.7, 3.8.10, 4.2.6, CALLP p.172,
 B/register and BNOP/register, compact Scs10 Figure F-19, predicate facts from
 predicated writes and across a backward jump, and a load disabled at issue still
-in flight when the return lands. No firmware bytes.
+in flight when the return lands; calls to separate functions, tail calls and
+jumps onto another function's entry in ordinary schedules. No firmware bytes.
 """
 from pathlib import Path
 import json,struct,sys
@@ -107,6 +108,9 @@ def main():
  # lowered state cap it compiles again without the split.
  plain('unrefined_retry',[mvk(0,0,2)|4<<29,mvk(1,8),mvk(2,7),ret(),4<<13],{'A8':1,'A7':2,'PC':0x9000},{'A1':1})
  rows[-1]['state_cap']=12  # 17 states with the split
+ # The same under the store-tail contract, which retries the same way.
+ plain('unrefined_retry_store_tail',[mvk(0,0,2)|4<<29,mvk(1,8),mvk(2,7),ret(),4<<13],{'A8':1,'A7':2,'PC':0x9000},{'A1':1})
+ rows[-1]['state_cap']=12;rows[-1]['store_tail']=True
  # Over a lowered state cap (33 states, cap 20), and the merged retries lose the fact it needs:
  # only the last retry, refined with the caps raised, compiles it.
  predicate_write('relaxed_retry_after_lost_fact',1,1);rows[-1]['state_cap']=20
@@ -132,6 +136,80 @@ def main():
  plain('dead_flight_at_return',[mvk(0,1)|1,3<<18|0x362,2<<13,4<<29|3<<23|4<<18|0x64,0],{'A3':0,'A1':0,'PC':0x9000},memory={0x8200:0x1234})
  # The same load issued in the packet the return lands in: its predicate is sampled at issue.
  plain('dead_flight_in_return_packet',[mvk(0,1)|1,3<<18|0x362,3<<13,4<<29|3<<23|4<<18|0x64,0],{'A3':0,'A1':0,'PC':0x9000},memory={0x8200:0x1234})
+ def unbounded(name):
+  # A COMPUTED_JUMP reference without a table and guard behind it is not a switch. The register
+  # comes from an input, since an MVK/MVKH constant would make it a direct branch.
+  c=0x1000+len(rows)*0x800;words=[mv(5,0),0,bnop(0,True),mvk(1,9),bnop(3)]
+  for k,w in enumerate(words):struct.pack_into(endian+'I',image,c-0x1000+4*k,w)
+  rows.append(dict(name=name,mode='plain',caller=c,caller_end=c+len(words)*4,sites=[],jump_refs=dict(branch=c+8,targets=[c+12]),expected={},refused='unresolved register branch'))
+ def separate(name,clobber,hole=False):
+  # Save B3 in A0 (not callee-saved), CALLP a separate function, return through A0. Kept only
+  # when the callee's code never writes A0. Compile only: the test executor has no callee.
+  # With a hole the callee's second word is left undisassembled, as code in another branch's
+  # delay slots is, and must still be read.
+  c=0x1000+len(rows)*0x800;f=c+0x200;words=[mv(3,0,cross=True),branch(c+4,f,2)|0x10000000,bnop(0,True)]
+  helper=[mvk(0,5),mvk(0,0 if clobber else 6),bnop(3)] if hole else ([mvk(0,0)] if clobber else [])+[bnop(3)]
+  for k,w in enumerate(words):struct.pack_into(endian+'I',image,c-0x1000+4*k,w)
+  for k,w in enumerate(helper):struct.pack_into(endian+'I',image,f-0x1000+4*k,w)
+  row=dict(name=name,mode='separate',caller=c,caller_end=c+len(words)*4,sites=[dict(callee=f,callee_end=f+len(helper)*4)],expected={},compile_only=True)
+  if hole:row['hole']=f+4
+  if clobber:row['refused']='unresolved register branch'
+  elif not hole:row['landings']=[dict(target=f,jump=False)]  # a call, drained
+  rows.append(row)
+ def jump_while_pending(name):
+  # B3 is overwritten from A5 (no provable return address), then B f lands on another
+  # function's entry while B back is still pending: a plain jump, not a call, so f's first
+  # packet runs and back returns through the saved link in A0.
+  c=0x1000+len(rows)*0x800;f=c+0x200;back=c+0x40
+  for at,block in [(c,[mv(3,0,cross=True),mv(5,3,2,True),branch(c+8,f),branch(c+12,back),3<<13]),(f,[mvk(4,9),bnop(3)]),(back,[bnop(0,True)])]:
+   for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
+  rows.append(dict(name=name,mode='separate',caller=c,caller_end=back+4,sites=[dict(callee=f,callee_end=f+8)],input={'A5':0x4444},
+                   expected={'A9':4,'A0':0x9000,'B3':0x4444,'PC':0x9000},
+                   # recorded as a plain jump onto f's entry, with back still pending: evidence that
+                   # this entry isn't drained, which must not count against calls to f
+                   landings=[dict(target=f,jump=True,pending_has='B@')]))
+ unbounded('switch_unbounded_reference')
+ separate('separate_untouched',False);separate('separate_clobber',True)
+ separate('separate_hole_untouched',False,True);separate('separate_hole_clobber',True,True)
+ jump_while_pending('jump_onto_entry_while_pending')
+ def complementary_flight(name,prior=False):
+  # [!B0] B f, a tail call, with [B0] LDW in its last delay slot (as in compiled switch
+  # cases): where the branch is taken the load doesn't run, so nothing is in flight when f
+  # starts. A load issued in the packet the branch lands in had its predicate evaluated only
+  # after the landing was recorded.
+  c=0x1000+len(rows)*0x800;f=c+0x200
+  words=[branch(c,f)|1<<29|1<<28,0,0,0,0,1<<29|3<<23|4<<18|0x64,bnop(3)]
+  blocks=[]
+  if prior:
+   # with [!B2] B own, an earlier branch to this function's own code, still pending; where it
+   # is taken, [!B2] MVK 1,B0 keeps the branch to f from being taken
+   words=[branch(c,c+0x100)|3<<29|1<<28,mvk(1,0,2)|3<<29|1<<28,branch(c+8,f)|1<<29|1<<28,0,0,0,0,1<<29|3<<23|4<<18|0x64,bnop(3)]
+   blocks=[(c+0x100,[bnop(3)])]
+  for at,block in [(c,words),(f,[bnop(3)])]+blocks:
+   for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
+  rows.append(dict(name=name,mode='separate',caller=c,caller_end=c+len(words)*4,sites=[dict(callee=f,callee_end=f+4)],expected={},compile_only=True,
+                   landings=[dict(target=f,jump=False)]))
+ complementary_flight('complementary_flight_at_call');complementary_flight('complementary_flight_behind_branch',True)
+ # the same LDW unpredicated is in flight, issued one cycle before f starts (+1): the callee's
+ # check counts its remaining delay slots from that age
+ complementary_flight('flight_age_at_call')
+ c=rows[-1]['caller'];struct.pack_into(endian+'I',image,c-0x1000+20,3<<23|4<<18|0x64)
+ rows[-1]['landings']=[dict(target=c+0x200,jump=False,pending_has=f'LDW@{c+20:x}+1')]
+ # The entry link saved in A0, B3 set by ADDKPC, then a jump to a block of this function's own
+ # code: the block's B B3 comes back to the ADDKPC address, it doesn't return from the function
+ # (a call into code inside another function). Taken as a return, A8 stays 0.
+ c=0x1000+len(rows)*0x800
+ def addkpc(pc,to,nops):return 3<<23|((to-(pc&~31))>>2&0x7f)<<16|nops<<13|0x162
+ plain('local_call_through_link_constant',[mv(3,0,cross=True),branch(c+4,c+0x40),addkpc(c+8,c+0x20,4)],{'A9':5,'A8':7,'PC':0x9000},
+       at={0x20:[mvk(7,8),bnop(0,True)],0x40:[mvk(5,9),bnop(3)]})
+ # A tail call to a function that returns through a copy of its link and leaves B3 at one of its
+ # own calls' return points: the run stands in for
+ # the callee by setting B3 to callee_b3. The tail call returns to B3 as it was at the branch.
+ c=0x1000+len(rows)*0x800;f=c+0x200
+ for at,block in [(c,[branch(c,f),4<<13]),(f,[mvk(0x77,4),bnop(3)])]:
+  for k,w in enumerate(block):struct.pack_into(endian+'I',image,at-0x1000+4*k,w)
+ rows.append(dict(name='tail_call_link_at_branch',mode='separate',caller=c,caller_end=c+8,sites=[dict(callee=f,callee_end=f+8)],
+                  expected={'PC':0x9000},callee_b3=0x1234,calls=[f]))
  assert len(rows)*0x800<=len(image)
  Path(sys.argv[1]).write_bytes(image);Path(sys.argv[2]).write_text(json.dumps(rows,indent=2)+'\n')
 if __name__=='__main__':main()

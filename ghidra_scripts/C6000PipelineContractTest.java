@@ -173,9 +173,10 @@ public class C6000PipelineContractTest extends GhidraScript {
             () -> {currentProgram.getProgramContext().remove(toAddr(0x3000), toAddr(0x3000), rs);
                 if (oldContext != null) currentProgram.getProgramContext().setRegisterValue(toAddr(0x3000), toAddr(0x3000), oldContext);}, "stale");
         stale(parallel, () -> currentProgram.getReferenceManager().addMemoryReference(toAddr(0x3800), toAddr(0x1004), RefType.UNCONDITIONAL_JUMP, SourceType.USER_DEFINED, 0),
-            () -> currentProgram.getReferenceManager().delete(currentProgram.getReferenceManager().getReference(toAddr(0x3800), toAddr(0x1004), 0)), "alternate entry");
+            // a jump into the interior no longer refuses an ordinary schedule, but the bound references changed
+            () -> currentProgram.getReferenceManager().delete(currentProgram.getReferenceManager().getReference(toAddr(0x3800), toAddr(0x1004), 0)), "stale");
         stale(parallel, () -> currentProgram.getSymbolTable().addExternalEntryPoint(toAddr(0x1004)),
-            () -> currentProgram.getSymbolTable().removeExternalEntryPoint(toAddr(0x1004)), "alternate entry");
+            () -> currentProgram.getSymbolTable().removeExternalEntryPoint(toAddr(0x1004)), "external entry inside scheduled code");
         stale(parallel, () -> getInstructionAt(toAddr(0x1000)).setFlowOverride(FlowOverride.BRANCH),
             () -> getInstructionAt(toAddr(0x1000)).setFlowOverride(FlowOverride.NONE), "stale");
         String oldEvidence = currentProgram.getOptions(C6000PipelineSchedules.OPTIONS).getString(C6000PipelineSchedules.contractKey(parallel), "");

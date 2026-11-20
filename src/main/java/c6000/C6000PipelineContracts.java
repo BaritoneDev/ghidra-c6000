@@ -220,6 +220,8 @@ public final class C6000PipelineContracts {
                 offset += width;
             }
         }
+        // a reviewed closed-call trace declares its owners; only ordinary schedules share code
+        AddressSet own = calls.isEmpty() ? ownCovered(program, function, schedule.covered()) : new AddressSet(schedule.covered());
         AddressSet scope = new AddressSet(function.getBody());
         scope.add(schedule.covered());
         AddressSet fetch = new AddressSet();
@@ -260,7 +262,7 @@ public final class C6000PipelineContracts {
                 if (value != null) normalized.setRegisterValue(value);
                 normalized.setRegisterValue(new RegisterValue(program.getRegister("c_schedule_entry"), BigInteger.ZERO));
                 text.append(':').append(normalized.getRegisterValue(base)).append('\n');
-                if (!at.equals(entry) && schedule.covered().contains(at) &&
+                if (!at.equals(entry) && own.contains(at) &&
                     BigInteger.ONE.equals(context.getValue(program.getRegister("c_schedule_entry"), at, false))) {
                     throw new IllegalArgumentException("another schedule entry lies inside the covered code");
                 }
@@ -288,7 +290,7 @@ public final class C6000PipelineContracts {
         var functions = program.getFunctionManager().getFunctions(fetch, true);
         while (functions.hasNext()) {
             var owner = functions.next();
-            if (!declaredEntries.contains(owner.getEntryPoint()) && schedule.covered().contains(owner.getEntryPoint())) {
+            if (!declaredEntries.contains(owner.getEntryPoint()) && own.contains(owner.getEntryPoint())) {
                 throw new IllegalArgumentException("another function enters scheduled code at " + owner.getEntryPoint());
             }
             text.append("function:").append(owner.getEntryPoint()).append(':').append(owner.getBody()).append('\n');
@@ -304,9 +306,15 @@ public final class C6000PipelineContracts {
         while (destinations.hasNext()) {
             monitor.checkCancelled();
             for (var ref : manager.getReferencesTo(destinations.next())) {
-                if (schedule.covered().contains(ref.getToAddress()) &&
+                // In an ordinary schedule only the entry instruction's p-code is replaced, so code
+                // elsewhere jumping into the body's interior, or data pointing there, keeps running
+                // the default p-code; it doesn't bypass the entry assumption. Covered code the body
+                // doesn't own yet would be absorbed: a jump into it makes it a shared tail, so that
+                // stays refused, as do closed-call scopes.
+                if (own.contains(ref.getToAddress()) &&
                     !declaredEntries.contains(ref.getToAddress()) &&
                     !schedule.covered().contains(ref.getFromAddress()) &&
+                    (!calls.isEmpty() || !function.getBody().contains(ref.getToAddress())) &&
                     (ref.getReferenceType().isFlow() || ref.getReferenceType().isData())) {
                     throw new IllegalArgumentException("alternate entry into scheduled code at " + ref.getToAddress());
                 }
@@ -318,13 +326,26 @@ public final class C6000PipelineContracts {
         while (entries.hasNext()) {
             Address at = entries.next();
             if (fetch.contains(at)) {
-                if (schedule.covered().contains(at) && !declaredEntries.contains(at)) {
+                if (own.contains(at) && !declaredEntries.contains(at)) {
                     throw new IllegalArgumentException("external entry inside scheduled code at " + at);
                 }
                 text.append("external:").append(at).append('\n');
             }
         }
         return sha256(text.toString());
+    }
+
+    /** The covered code this function owns. Code another function owns that an ordinary schedule
+     * jumps or falls into (a shared epilogue, a stub running on into the next function) stays that
+     * function's: its entries and references are its own. Its bytes are still bound. */
+    static AddressSet ownCovered(Program program, Function function, AddressSetView covered) {
+        AddressSet own = new AddressSet(covered);
+        var others = program.getFunctionManager().getFunctionsOverlapping(covered);
+        while (others.hasNext()) {
+            var other = others.next();
+            if (!other.equals(function)) own = own.subtract(other.getBody());
+        }
+        return own;
     }
 
     /** Read-only source preflight for explicitly configured closed-call activation. */

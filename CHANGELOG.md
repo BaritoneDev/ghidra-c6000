@@ -4,6 +4,25 @@
 
 ### Added
 
+* Calls in ordinary exact schedules. A branch that lands on another function's entry, or
+  a register branch that isn't a return, becomes a p-code `CALL`/`CALLIND` when B3 holds
+  a return address on that path: a `CALLP` link or an `ADDKPC` constant. Effects still in
+  flight finish first, and the schedule continues at the return address with nothing
+  pending (the callee is taken to return drained, as compiled code does). With B3 still
+  the entry link, or reloaded by an `LDW`, a direct branch or a register branch through
+  a loaded pointer is a tail call; with B3 not written since the last call it is a plain
+  jump. A copy of the return link survives a call in the callee-saved registers and in
+  any register the callee's code never writes. Before, any call outside a reviewed
+  closed-call trace refused the schedule.
+* Ordinary schedules compile in code another function owns that they jump or fall into
+  (a shared epilogue, a stub running on into the next function); it stays that
+  function's, and its entries and references are not alternate entries into this one.
+  Jumps from elsewhere into code the body already owns no longer refuse it, since only
+  the entry's p-code is replaced; a jump into covered code the activation would absorb
+  still does (it would become a shared tail). Reviewed closed-call traces stay strict.
+* `C6000PipelineCompiler.callLandings()` reports what each call or jump onto another
+  entry leaves in flight, as evidence for the callee's own entry.
+
 * `C6000 Jump Tables` reads a guarded table that is set up before a jump into the
   dispatch tail: when the straight-line code before the register branch holds no table,
   each jump into that code gives another path (what precedes the jump, its delay slots,

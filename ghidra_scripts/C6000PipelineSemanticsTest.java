@@ -41,9 +41,15 @@ public class C6000PipelineSemanticsTest extends GhidraScript {
   var f=funcs.get(0x1000L);f.setReturnType(ghidra.program.model.data.UnsignedIntegerDataType.dataType,SourceType.USER_DEFINED);new ghidra.app.cmd.disassemble.DisassembleCommand(toAddr(0x1000),new AddressSet(toAddr(0x1000),toAddr(0x1003)),false).applyTo(currentProgram,monitor);
   c6000.C6000PipelineSchedules.enable(currentProgram,f,"Synthetic function begins with an empty pipeline",Set.of(),monitor);
   var bodyBefore=new AddressSet(f.getBody());c6000.C6000PipelineSchedules.enable(currentProgram,f,"Synthetic function begins with an empty pipeline",Set.of(),monitor);if(!f.getBody().equals(bodyBefore))throw new AssertionError("Enable not idempotent");
-  currentProgram.getFunctionManager().createFunction("foreign_owner",toAddr(0x2200),new AddressSet(toAddr(0x2200),toAddr(0x221f)),SourceType.USER_DEFINED);
+  // 0x2100 branches into foreign_owner's code: ordinary schedules take that now, and the code stays foreign_owner's
+  var foreign=currentProgram.getFunctionManager().createFunction("foreign_owner",toAddr(0x2200),new AddressSet(toAddr(0x2200),toAddr(0x221f)),SourceType.USER_DEFINED);
+  {var into=currentProgram.getFunctionManager().createFunction("into_foreign",toAddr(0x2100),new AddressSet(toAddr(0x2100),toAddr(0x211f)),SourceType.USER_DEFINED);
+   if(!new ghidra.app.cmd.disassemble.DisassembleCommand(toAddr(0x2100),new AddressSet(toAddr(0x2100),toAddr(0x2103)),false).applyTo(currentProgram,monitor))throw new AssertionError("Cannot define shared-code entry");
+   var foreignBody=new AddressSet(foreign.getBody());c6000.C6000PipelineSchedules.enable(currentProgram,into,"Synthetic empty entry",Set.of(),monitor);
+   if(!java.math.BigInteger.ONE.equals(currentProgram.getProgramContext().getValue(currentProgram.getRegister("c_schedule_entry"),toAddr(0x2100),false)))throw new AssertionError("Shared-code schedule not enabled");
+   if(currentProgram.getFunctionManager().getFunctionAt(toAddr(0x2200))!=foreign||!foreign.getBody().equals(foreignBody)||into.getBody().intersects(foreignBody))throw new AssertionError("Shared code changed owner");}
   createData(toAddr(0x2304),ghidra.program.model.data.DWordDataType.dataType);
-  var rejections=Map.of(0x1e00L,"unimplemented phase contract",0x2000L,"potential simultaneous memory/register writes",0x2100L,"another function",0x2300L,"defined data",0x2400L,"return leaves architectural pipeline effects pending");
+  var rejections=Map.of(0x1e00L,"unimplemented phase contract",0x2000L,"potential simultaneous memory/register writes",0x2300L,"defined data",0x2400L,"return leaves architectural pipeline effects pending");
   for(var rejection:rejections.entrySet()){
    long address=rejection.getKey();var bad=currentProgram.getFunctionManager().createFunction("refuse_"+address,toAddr(address),new AddressSet(toAddr(address),toAddr(address+0x1f)),SourceType.USER_DEFINED);
    if(!new ghidra.app.cmd.disassemble.DisassembleCommand(toAddr(address),new AddressSet(toAddr(address),toAddr(address+3)),false).applyTo(currentProgram,monitor))throw new AssertionError("Cannot define refusal entry");

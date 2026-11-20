@@ -69,7 +69,8 @@ public class C6000PipelineCallContractTest extends GhidraScript {
    String code=decompile(f);if(code.contains("c6000_pipeline(")||!code.contains("dest")||!code.contains("value")||!code.contains("="))throw new AssertionError("Opaque or lost store: "+code);for(var h:helpers.values())if(code.contains(h.getName()+"("))throw new AssertionError("Sequential call decompilation: "+code);Files.writeString(directory.resolve(name+".c"),code);
    if(checked==0){
     var option=currentProgram.getOptions(C6000PipelineSchedules.OPTIONS);String key=C6000PipelineSchedules.closedCallsKey(f),stored=option.getString(key,"");
-    stale(f,()->option.setString(key,stored+" "),()->option.setString(key,stored),"stale");stale(f,()->option.setString(key,"{bad"),()->option.setString(key,stored),"Invalid closed-call");stale(f,()->option.removeOption(key),()->option.setString(key,stored),"another function");
+    stale(f,()->option.setString(key,stored+" "),()->option.setString(key,stored),"stale");stale(f,()->option.setString(key,"{bad"),()->option.setString(key,stored),"Invalid closed-call");// without its plan the caller compiles as an ordinary schedule, which keeps calls as calls and refuses later
+    stale(f,()->option.removeOption(key),()->option.setString(key,stored),"Exact C6000 schedule failed");
     String hazard=option.getString(C6000PipelineSchedules.hazardsKey(f),"");stale(f,()->option.setString(C6000PipelineSchedules.hazardsKey(f),"A4"),()->option.setString(C6000PipelineSchedules.hazardsKey(f),hazard),"hazard assumptions changed");
     long target=helpers.keySet().iterator().next();int original=currentProgram.getMemory().getInt(toAddr(target));stale(f,()->patch(target,original^0x80),()->patch(target,original),"byte hash mismatch");
     var helper=helpers.get(target);var body=new AddressSet(helper.getBody());stale(f,()->helper.setBody(new AddressSet(toAddr(target),toAddr(target+3))),()->helper.setBody(body),"ownership");
