@@ -550,6 +550,13 @@ OffReg: rb_off is rb_off & i7=1 { export rb_off; }
 # SPRUFE8B sections 2.8.3 and 3.9.2: AMR selects circular arithmetic only
 # for A4-A7/B4-B7. BK0/BK1 encode the log2 block size minus one. The
 # high bits of the original base remain fixed across the calculation.
+@if FP_MODEL == "analysis"
+# Reading aid: compiled C keeps AMR at 0, and modelling it masks every load in the output.
+# With AMR zero every base register addresses linearly (SPRUFE8B 2.8.3, 3.9.2).
+macro c6000_circular_mask(index, side, mask) {
+  mask = 0xffffffff;
+}
+@else
 macro c6000_circular_mask(index, side, mask) {
   local selected:4 = index;
   local file:4 = side;
@@ -566,6 +573,7 @@ macro c6000_circular_mask(index, side, mask) {
   mask = (1 << blockBits) - 1;
   <done>
 }
+@endif
 
 macro c6000_wrap_address(base, delta, index, side, result) {
   local original:4 = base;

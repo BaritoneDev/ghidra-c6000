@@ -4,6 +4,11 @@
 
 ### Changed
 
+* The `analysis` and `c67x-analysis` languages address linearly and ignore AMR. Compiled
+  C keeps AMR at zero, and modelling circular addressing put an AMR-dependent mask on
+  every load and store through A4-A7/B4-B7 in the decompiled output. The `default` and
+  `c67x` languages keep the exact model.
+
 * An unpredicated instruction is lifted with no predicate guard. Every ordinary instruction
   had one constructor whose semantics sat behind `if (Cond == 0) goto <skip>`, a constant
   test when there is no predicate. The decompiler works out a call's arguments before it

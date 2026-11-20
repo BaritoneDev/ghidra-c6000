@@ -205,7 +205,9 @@ eight-bit-accurate seed. TI does not publish the seed lookup table, so ordinary 
 are not proven bit-exact against hardware.
 
 The `analysis` language variants simplify floating-point arithmetic and use an opaque
-status userop. They are reading aids; use the default languages for emulation and exact
+status userop. They also address linearly, ignoring AMR: compiled C keeps AMR at zero, and
+modelling it masks every load and store through A4-A7/B4-B7 in the output. They are
+reading aids; use the default languages for emulation, circular addressing and exact
 rounding/status checks.
 
 The published RPACK2 execution rule and compiler guide specify a saturating left shift.
