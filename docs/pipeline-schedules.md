@@ -131,11 +131,13 @@ previously issued writes still mature. TSR.SPLX tracks buffer activity independe
 fetch.
 
 Normal post-loop execution resumes at the SPKERNEL delay, capped at the end of the
-epilog (SPRUFE8B p.481, 7.9.4, 7.12). It does not add six cycles for a fresh
-PG-through-DC fetch: the general pipeline diagram in 4.1.4 does not establish that a
-suspended sequential stream is discarded. Abrupt SPLOOPW exits retain their separate
-conservative transition contract; nested reloads are unsupported. No C674x
-silicon-equivalence claim is made. A required X-path or AMR stall for a buffered
+epilog (SPRUFE8B p.481, 7.9.4, 7.12). A counted loop that stops before SPKERNEL is
+loaded (an early exit) never reaches a kernel stage boundary, so that delay does not
+apply: fetch resumes only when the buffer is idle (7.8.2, 7.9.4). Neither adds six
+cycles for a fresh PG-through-DC fetch: the general pipeline diagram in 4.1.4 does not
+establish that a suspended sequential stream is discarded. Abrupt SPLOOPW exits retain
+their separate conservative transition contract; nested reloads are unsupported. No
+C674x silicon-equivalence claim is made. A required X-path or AMR stall for a buffered
 instruction is refused because 7.15.2 specifies LBX/MSX exception behavior, not an
 automatic stall. Program memory instructions retain automatic stalls; unchanged
 complementary sampled predicates are permitted for buffered E1 readers. The separate
