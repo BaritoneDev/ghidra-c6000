@@ -13,6 +13,12 @@
   token. The fork costs states, so a schedule over the state cap is compiled once more
   without it before it is refused. `C6000PipelineCompiler.maxStates` holds the cap (4096).
 
+* Exact schedules no longer refuse a return that lands while an instruction disabled at
+  issue is still in flight (`[A1] LDW` issued after A1 was cleared). Such an instruction
+  does nothing more, so it is not a pending effect, also for a store-tail return. Its
+  predicate is sampled when it issues, so this holds for one issued in the return's own
+  landing packet too.
+
 ### Changed
 
 * A schedule over the caps is merged before it is refused. Most of a large schedule is

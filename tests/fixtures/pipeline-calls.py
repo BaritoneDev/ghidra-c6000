@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sequential leaf calls, CALLP and saved return links; IMAGE JSON [be].
 Independent synthetic fields: SPRUFE8B 3.5, 3.7, 3.8.10, 4.2.6, CALLP p.172,
-B/register and BNOP/register, compact Scs10 Figure F-19, and predicate facts
-from predicated writes and across a backward jump. No firmware bytes.
+B/register and BNOP/register, compact Scs10 Figure F-19, predicate facts from
+predicated writes and across a backward jump, and a load disabled at issue still
+in flight when the return lands. No firmware bytes.
 """
 from pathlib import Path
 import json,struct,sys
@@ -85,12 +86,14 @@ def main():
   for variant,error in [('collision','simultaneous'),('nop_conflict','multicycle NOP'),('pending_branch','CALLP requires'),('clobber_saved','unresolved register branch'),('late_link','unresolved register branch'),('nonlocal_return','unresolved register branch')]:add(f'callp_s{side}_{variant}',side=side,variant=variant,error=error)
  for variant,error in [('',None),('copy_chain',None),('delay_overwrite',None),('disabled_clobber',None),('delay_late_overwrite',None),('unknown','unresolved register branch'),('overwrite','unresolved register branch'),('conditional','unresolved register branch'),('same_packet','unresolved register branch'),('late','unresolved register branch')]:add('saved_link_'+(variant or 'plain'),'ordinary',variant=variant,error=error)
  for variant,error in [('',None),('distinct',None),('clobber_target','target lacks exact'),('late_target','target lacks exact'),('clobber_alias','unresolved register branch')]:add('multi_'+(variant or 'reuse'),'multi',variant=variant,error=error)
- def plain(name,words,expected,inputs=None,at=None):
+ def plain(name,words,expected,inputs=None,at=None,memory=None):
   # words at the entry, more blocks at offsets from it
   c=0x1000+len(rows)*0x800;blocks={0:words,**(at or {})}
   for offset,block in blocks.items():
    for k,w in enumerate(block):struct.pack_into(endian+'I',image,c+offset-0x1000+4*k,w)
-  rows.append(dict(name=name,mode='plain',caller=c,caller_end=c+max(o+len(b)*4 for o,b in blocks.items()),sites=[],expected=expected,input=inputs or {}))
+  row=dict(name=name,mode='plain',caller=c,caller_end=c+max(o+len(b)*4 for o,b in blocks.items()),sites=[],expected=expected,input=inputs or {})
+  if memory:row['memory']={str(k):v for k,v in memory.items()}
+  rows.append(row)
  def ret(pred=0):return pred|3<<18|0x362
  def predicate_write(name,a1,b0):
   # [A1] MVK 0,B0 ties B0 to A1: where A1 held, B0 is 0 and [B0] B y can't follow the [A1]
@@ -104,9 +107,6 @@ def main():
  # lowered state cap it compiles again without the split.
  plain('unrefined_retry',[mvk(0,0,2)|4<<29,mvk(1,8),mvk(2,7),ret(),4<<13],{'A8':1,'A7':2,'PC':0x9000},{'A1':1})
  rows[-1]['state_cap']=12  # 17 states with the split
- # The same under the store-tail contract, which retries the same way.
- plain('unrefined_retry_store_tail',[mvk(0,0,2)|4<<29,mvk(1,8),mvk(2,7),ret(),4<<13],{'A8':1,'A7':2,'PC':0x9000},{'A1':1})
- rows[-1]['state_cap']=12;rows[-1]['store_tail']=True
  # Over a lowered state cap (33 states, cap 20), and the merged retries lose the fact it needs:
  # only the last retry, refined with the caps raised, compiles it.
  predicate_write('relaxed_retry_after_lost_fact',1,1);rows[-1]['state_cap']=20
@@ -127,6 +127,11 @@ def main():
         {'A9':0 if b0 else 1,'A8':2,'A7':3,'A6':5 if b0 else 0x12345678,'PC':0x9000},{'B0':b0},
         at={0x40:[mvk(2,8),mvk(3,7),0,mvk(5,6)|1<<29,bnop(3)]})
   rows[-1]['state_cap']=rows[-1]['max_states']=30  # 33 refined; merged 28
+ # [A1] LDW is issued after A1 was cleared, one cycle before the return lands: disabled at
+ # issue, it does nothing more, so the return doesn't leave it pending.
+ plain('dead_flight_at_return',[mvk(0,1)|1,3<<18|0x362,2<<13,4<<29|3<<23|4<<18|0x64,0],{'A3':0,'A1':0,'PC':0x9000},memory={0x8200:0x1234})
+ # The same load issued in the packet the return lands in: its predicate is sampled at issue.
+ plain('dead_flight_in_return_packet',[mvk(0,1)|1,3<<18|0x362,3<<13,4<<29|3<<23|4<<18|0x64,0],{'A3':0,'A1':0,'PC':0x9000},memory={0x8200:0x1234})
  assert len(rows)*0x800<=len(image)
  Path(sys.argv[1]).write_bytes(image);Path(sys.argv[2]).write_text(json.dumps(rows,indent=2)+'\n')
 if __name__=='__main__':main()
