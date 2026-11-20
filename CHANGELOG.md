@@ -21,7 +21,7 @@
   the pipeline is drained, then wherever no branch is pending and no loop runs; a last
   try doubles the state cap and raises the operation cap by a third, refined and merged.
   Facts about a predicate register that is written again before anything reads it are
-  forgotten on every attempt.
+  forgotten on every attempt. Store-tail schedules retry the same way.
 * The p-code operation cap is a setting, `C6000PipelineCompiler.maxPcodeOps`, by default
   the builder's one million. Decompile time grows quickly with size (about 17 s at 69,000
   operations, 160 s at 99,000), so a caller with a timeout may lower it.
