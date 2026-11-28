@@ -39,10 +39,14 @@ final class C6000Recording {
 		FunctionIterator.class, Iterator.class);
 
 	private final AddressSet reads = new AddressSet();
-	// The last packet range noted: a proof reads the same packets over and over, and adding a range
-	// already there still walks the address set's tree.
+	// Open captures (C6000ReadCache): the reads of each answer being computed, innermost first.
+	private final ArrayDeque<AddressSet> captures = new ArrayDeque<>();
+	// The last packet range noted, and the captures open then: a proof reads the same packets over and
+	// over, and adding a range already there still walks the address set's tree.
 	private ghidra.program.model.address.AddressSpace lastSpace;
 	private long lastLo = 1, lastHi = 0;
+	private int lastCaptures = -1;
+	private int captureChanges;
 	private final IdentityHashMap<Object, Object> views = new IdentityHashMap<>();
 	private final Program program;
 
@@ -58,6 +62,34 @@ final class C6000Recording {
 	/** Every address read through the view so far, widened to whole fetch packets. */
 	AddressSetView reads() {
 		return reads;
+	}
+
+	/** The recording {@code object} is a view of; null if it is not one. */
+	static C6000Recording of(Object object) {
+		if (object != null && Proxy.isProxyClass(object.getClass()) &&
+			Proxy.getInvocationHandler(object) instanceof Handler handler) return handler.recording();
+		return null;
+	}
+
+	/** Start collecting the reads of one computation, for a cache to keep with its answer; see {@link #release}. */
+	AddressSet capture() {
+		AddressSet set = new AddressSet();
+		captures.push(set);
+		captureChanges++;
+		return set;
+	}
+
+	/** End the capture {@link #capture} began. */
+	void release(AddressSet set) {
+		if (captures.peek() == set) captures.pop();
+		else captures.remove(set);
+		captureChanges++;
+	}
+
+	/** Record {@code set} as read: what a cached answer read when it was computed. */
+	void replay(AddressSetView set) {
+		reads.add(set);
+		for (AddressSet open : captures) open.add(set);
 	}
 
 	/** The recording view of {@code object}, if it came from this or another recording's program. */
@@ -113,9 +145,11 @@ final class C6000Recording {
 		long lo = from.getOffset() & ~31L, hi = to.getOffset() | 31L;
 		lo = Math.max(lo, space.getMinAddress().getOffset());
 		hi = Math.min(hi, space.getMaxAddress().getOffset());
-		if (space == lastSpace && lo >= lastLo && hi <= lastHi) return;
-		lastSpace = space; lastLo = lo; lastHi = hi;
-		reads.add(from.getNewAddress(lo), from.getNewAddress(hi));
+		if (space == lastSpace && lastCaptures == captureChanges && lo >= lastLo && hi <= lastHi) return;
+		lastSpace = space; lastLo = lo; lastHi = hi; lastCaptures = captureChanges;
+		Address min = from.getNewAddress(lo), max = from.getNewAddress(hi);
+		reads.add(min, max);
+		for (AddressSet open : captures) open.add(min, max);
 	}
 
 	private void note(AddressSetView set) {
@@ -133,6 +167,10 @@ final class C6000Recording {
 
 		Handler(Object target) {
 			this.target = target;
+		}
+
+		C6000Recording recording() {
+			return C6000Recording.this;
 		}
 
 		@Override
